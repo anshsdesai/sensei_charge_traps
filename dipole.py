@@ -240,6 +240,7 @@ def getDipoleList2(image_dir,temperatures,goodquads,plot=False):
                 dtph = int(re.findall('dtph\d+_',imagefile)[0][4:-1])
                 image = get_qdata(imagefile,q)
                 image = crop_qdata(image)#,ylower=500,xlower=100)
+                print(imagefile)
                 image = approximate_electronize(image,eval)
                 image_dipoles = findDipoles2(image)
                 for dipole in image_dipoles:
