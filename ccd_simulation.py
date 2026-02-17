@@ -84,8 +84,10 @@ def transplant_clusters(source_image, target_shape=(520, 3200),
         # 2. Threshold by radius to create the mask
         dilated_mask = dist_map <= radius
 
+        foreign_clusters_mask = (local_labels > 0) & (local_labels != label_id)
 
         final_cluster_chunk = local_block * dilated_mask
+        final_cluster_chunk[foreign_clusters_mask] = 0
 
         
      
