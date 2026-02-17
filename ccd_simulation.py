@@ -1,139 +1,3 @@
-import numpy as np
-import matplotlib.pyplot as plt
-from scipy.stats import linregress
-from astropy.io import fits
-from utils import *
-from tqdm.autonotebook import tqdm
-
-
-
-
-from collections import Counter
-image_dir_search = 'proc/*.fits'
-temperatures = []
-
-
-for image in glob.glob(image_dir_search):
-    temp = re.findall('_\d+k',image)[0][1:-1]
-    if 'dtph' not in image:
-        continue
-    # if temp not in temperatures:
-   
-    temperatures.append(temp)
-temperatures_strs = np.array(temperatures)
-
-print(Counter(temperatures_strs))
-# temperatures = np.unique(np.sort(temperatures))
-temps = np.sort(np.array([int(t) for t in temperatures_strs]))
-
-
-
-from dipole import *
-import pickle
-goodQuads = [0,1,2,3]
-image_dir = 'proc/'
-test_temps = temperatures
-
-
-try:
-    with open('dipole_coord_list.pkl','rb') as infile:
-        full_dipole_coord_list = pickle.load(infile)
-except FileNotFoundError:
-    full_dipole_coord_list = getDipoleList2(image_dir,test_temps,goodQuads)
-    with open('dipole_coord_list.pkl','wb') as outfile:
-        pickle.dump(full_dipole_coord_list,outfile)
-
-        
-try:
-    with open('dipole_spectra.pkl','rb') as infile:
-        dipole_spectra = pickle.load(infile)
-except FileNotFoundError:
-    dipole_spectra = getDipoleSpectra2(image_dir,goodQuads,full_dipole_coord_list)
-    with open('dipole_spectra.pkl','wb') as outfile:
-        pickle.dump(dipole_spectra,outfile)
-
-useIntensityErr = True
-wellBehavedThreshold = 4
-threshold_str = f'_{wellBehavedThreshold}'
-intensity_str = '_err' if useIntensityErr else ''
-try:
-    with open(f'fit_dipole_spectra{intensity_str}{threshold_str}.pkl','rb') as infile:
-        fit_dipole_spectra = pickle.load(infile)
-
-except FileNotFoundError:
-    fit_dipole_spectra = fitTrapIntensity(dipole_spectra,useIntensityErr=useIntensityErr,wellBehavedThreshold=wellBehavedThreshold)
-    with open(f'fit_dipole_spectra{intensity_str}{threshold_str}.pkl','wb') as outfile:
-        pickle.dump(fit_dipole_spectra,outfile)
-
-
-tau_at_135s = []
-for q in [0,1,2,3]:
-    
-    dpkeys = list(fit_dipole_spectra[q])
-    for i in range(len(dpkeys)):
-        
-        # dpkeys = list(fit1_dipole_spectra[q])
-        # dp = random.choice(dpkeys)
-        dp = dpkeys[i]
-        if type(dp) != tuple:
-            continue
-        testdp = fit_dipole_spectra[q][dp]
-        if testdp['WellBehavedTrap'] and not testdp['EnergyFitFailed']:
-            testdpfit = testdp['EnergyFitInfo']
-
-            # p_value = testdpfit['p_value'] 
-            # chi_squared = testdpfit['chi2']
-            # r2 = testdpfit['r_squared']
-
-            # pvals.append(p_value)
-            # chi2s.append(chi_squared)
-            # r2s.append(r2)
-            # red_chi2s.append( testdpfit['reduced_chi2'])
-
-
-            # fit_is_good = chi_squared < 100
-
-            # fit_is_good = p_value < 0.05
-            fit_is_good = testdp["GoodEnergyFit"]
-            # fit_is_good = fit_is_good and 
-            # maxtau = np.max(testdpfit['taus'])
-            # maxtaus.append(maxtau)
-            # fit_is_good = fit_is_good
-            # fit_is_good = True
-
-
-            if fit_is_good:
-                cs = testdpfit['BestFitCrossSection']
-                cserr = testdpfit['BestFitCrossSectionErr']
-                e = testdpfit['BestFitEnergy']
-                e_err = testdpfit['BestFitEnergyErr']
-
-                 # temperatures = np.linspace(120,180,100)
-                logtau_at_135 = log_energy_cross_section(135,e,np.log(cs))
-
-                tau_at_135 = np.exp(logtau_at_135)
-                tau_at_135s.append(tau_at_135)
-              
-
-                
-                  
-bins = np.geomspace(1e-5,1e9,100)
-tau_at_135s = np.array(tau_at_135s)  
-hist,bin_edges = np.histogram(tau_at_135s,bins)          
-bin_centers = np.sqrt(bin_edges[:-1] * bin_edges[1:])
-# stuff =  plt.hist(tau_at_135s,bins=bins)
-# plt.stairs(hist,bins)
-# plt.xlabel("$\\tau_e$")
-# plt.xscale('log')
-# plt.ylabel("Counts")
-# plt.show()
-# plt.close()
-
-
-tau_weights = hist
-tau_values = bin_centers
-
-
 from astropy.time import Time
 #use a snolab image and assume this time is valid for pixel times
 
@@ -145,53 +9,349 @@ def pixel_time_vertical(nsamp,ncol, delayH, delayIped, delayIsig, delaySW, delay
   return (pixel_time_hor+(int(delaySW)+int(delayDG)))*int(ncol)
 
 
-snolab_dir = '/data/analyses/snolab_run1/'
-file = 'proc_corr_proc_skp_sensei_2023-02-14_135K_run7_commissioning_NROW520_NBINROW1_NCOL3200_NBINCOL1_EXPOSURE72000_CLEAR10800_5_83.fits'
-with fits.open(snolab_dir +file) as hdul:
-    q = hdul[0]
-    header = q.header
-    print(list(header.keys()))
-    nrow=header['NROW']
-    ncol=header['NCOL']
-    exposure=header['EXPOSURE']
-    nsamp=header['NSAMP']
-    delayH=header['HIERARCH DELAY_H_OVERLAP']
-    delayRG=header['HIERARCH DELAY_RG_WIDTH']
-    delayIped=header['HIERARCH DELAY_INTEG_PED']
-    delaySW=header['HIERARCH DELAY_SWHIGH']
-    delayIsig=header['HIERARCH DELAY_INTEG_SIG']
-    delayOG=header['HIERARCH DELAY_OG_LOW']
-    delayDG=header['HIERARCH DELAY_DG_LOW']
-
-
+def transplant_clusters(source_image, target_shape=(520, 3200), 
+                                    count_threshold=20, max_aspect_ratio=3.0, 
+                                    radius=20,exposure=72000,scale_factor = 1):
+    from skimage.morphology import dilation, disk
+    from scipy import ndimage
+    from scipy.ndimage import distance_transform_edt
+    import numpy as np
     
-#     print(list(q.header.keys()))
-#     print(q.header['DATESTART'])
-#     print(q.header['EXPOSURE'])
+    # 1. Label and Measure
+    labeled_array, num_features = ndimage.label(source_image > 0)
+    cluster_slices = ndimage.find_objects(labeled_array)
+    cluster_sums = ndimage.sum(source_image, labeled_array, index=np.arange(1, num_features + 1))
+    
+    new_image = np.zeros(target_shape, dtype=source_image.dtype)
+    img_h, img_w = new_image.shape
+    src_h, src_w = source_image.shape
+    rng = np.random.default_rng()
+    
+    totClusters = num_features
+    # Calculate how many we WANT to process
+    target_num_clusters = int(np.round(scale_factor * (exposure / 72000) * num_features))
+    
+    print(f"Exposure: {exposure}, Inserting approx {target_num_clusters} clusters out of {totClusters}")
 
-#     dte_start = q.header['DATESTART']
-#     dte_end = q.header['DATEEND']
-#     t = Time([dte_start,dte_end], format='isot')
-#     readout_time = t.jd[1] - t.jd[0]
-#     print(readout_time * 24 * 3600)
-#     readout_time =readout_time * 24 * 3600
-# # singleReadTime = smask.readout_time - exp
-# # seconds_per_row = (singleReadTime)/nRow
-# # seconds_per_pixel = seconds_per_row/nCol
+    # --- FIX START: Randomize the selection ---
+    # Create a list of all valid IDs (1 to num_features)
+    all_label_ids = np.arange(1, num_features + 1)
+    
+    # Shuffle them randomly
+    rng.shuffle(all_label_ids)
+    
+    # Select only the first N IDs from the shuffled list
+    selected_labels = all_label_ids[:target_num_clusters]
+    # --- FIX END ---
 
-# singleReadTime = readout_time - 72000
+    # 2. Loop through the RANDOMLY SELECTED clusters
+    for label_id in selected_labels:
+        
+        # --- FILTERS (Count & Shape) ---
+        # Note: adjust index by -1 because cluster_sums is 0-indexed relative to labels
+        if cluster_sums[label_id - 1] <= count_threshold:
+            continue
 
-# seconds_per_row = (singleReadTime)/nRow
-# seconds_per_pixel = seconds_per_row/nCol
-tpix=pixel_time(nsamp, delayH, delayIped, delayIsig, delaySW, delayRG, delayOG) / 15e6
-tpix_vertical=pixel_time_vertical(nsamp,ncol, delayH, delayIped, delayIsig, delaySW, delayRG, delayOG,delayDG)/15e6
+        sl = cluster_slices[label_id - 1]
+        y_slice, x_slice = sl
+        height = y_slice.stop - y_slice.start
+        width = x_slice.stop - x_slice.start
+        
+        if min(height, width) == 0: continue
+        if max(height, width) / min(height, width) > max_aspect_ratio:
+            continue
+
+        # ... (Rest of your code remains exactly the same) ...
+        # ... EXPAND SLICE ...
+        y_start_expanded = max(0, y_slice.start - radius)
+        y_stop_expanded  = min(src_h, y_slice.stop + radius)
+        x_start_expanded = max(0, x_slice.start - radius)
+        x_stop_expanded  = min(src_w, x_slice.stop + radius)
+        
+        expanded_slice = (slice(y_start_expanded, y_stop_expanded), 
+                          slice(x_start_expanded, x_stop_expanded))
+        
+        local_block = source_image[expanded_slice]
+        local_labels = labeled_array[expanded_slice]
+        
+        specific_cluster_mask = (local_labels == label_id)
+        # 1. Compute distance from the cluster (invert mask so cluster is 0)
+        # 'distance_transform_edt' calculates distance to the nearest ZERO pixel.
+        # So we invert: Cluster becomes False (0), Background becomes True (1).
+
+        dist_map = distance_transform_edt(~specific_cluster_mask)
+
+        # 2. Threshold by radius to create the mask
+        dilated_mask = dist_map <= radius
+
+
+        final_cluster_chunk = local_block * dilated_mask
+
+        
+     
+        
+        
+        # --- PLACEMENT ---
+        h, w = final_cluster_chunk.shape
+        placed = False
+        attempts = 0
+        
+        while not placed and attempts < 100:
+            max_r = img_h - h
+            max_c = img_w - w
+            
+            if max_r < 0 or max_c < 0: break
+
+            r = rng.integers(0, max_r)
+            c = rng.integers(0, max_c)
+            
+            target_area = new_image[r:r+h, c:c+w]
+            
+            if not np.any((target_area > 0) & (final_cluster_chunk > 0)):
+                new_image[r:r+h, c:c+w] += final_cluster_chunk
+                placed = True
+            
+            attempts += 1
+            
+    return new_image
 
 
 
+def unbin_counts_conservative(binned_data):
+    import numpy as np
+    """
+    Unbins a (rows, cols) array into (rows*32, cols) while:
+    1. Conserving total counts (Sum unbinned == Original pixel).
+    2. Keeping all values as integers.
+    3. Randomly distributing remainders to avoid systematic bias.
+    """
+    rows, cols = binned_data.shape
+    expansion = 32
+    
+    # 1. Calculate Base and Remainder
+    # q: The base integer value for every sub-pixel
+    # r: The number of extra '+1's we need to sprinkle in
+    q = binned_data // expansion
+    r = binned_data % expansion
+
+    # 2. Create the Base Array
+    # Repeat the quotient 32 times.
+    # Shape becomes (20, 32, 3200) for easier manipulation
+    unbinned_view = np.repeat(q[:, np.newaxis, :], expansion, axis=1)
+
+    # 3. Generate Random Masks for Remainders
+    # We need to add 1 to exactly 'r' pixels in each column-block.
+    # We generate random noise, sort it, and select the top 'r' indices.
+    
+    # Create random noise (20, 32, 3200)
+    rng = np.random.default_rng()
+    noise = rng.random(unbinned_view.shape)
+    
+    # argsort along the expansion axis gives us random indices 0..31
+    # We want to identify the slots that should receive the extra counts.
+    # A simple way: Rank the noise. If the rank is < remainder, add 1.
+    random_ranks = np.argsort(noise, axis=1)
+    
+    # Broadcast 'r' to match the shape (20, 1, 3200) for comparison
+    r_broadcast = r[:, np.newaxis, :]
+    
+    # Create the boolean mask where we add the extra count
+    # This selects exactly 'r' random locations per block
+    add_mask = random_ranks < r_broadcast
+    
+    # 4. Apply and Reshape
+    final_data = unbinned_view + add_mask.astype(int)
+    
+    # Flatten the middle dimension to get final (640, 3200)
+    return final_data.reshape(rows * expansion, cols)
+
+
+def inject_single_e(image, n_events=100, intensity=1, exclusion_mask=None):
+    import numpy as np
+    """
+    Injects 'n' single-pixel events into the image.
+    If 'exclusion_mask' is provided, events will NOT be placed where the mask is True.
+    """
+    rows, cols = image.shape
+    rng = np.random.default_rng()
+    
+    if exclusion_mask is None:
+        # Original behavior: Randomly select from the whole image
+        random_rows = rng.integers(0, rows, size=n_events)
+        random_cols = rng.integers(0, cols, size=n_events)
+        np.add.at(image, (random_rows, random_cols), intensity)
+    else:
+        # New behavior: Select only from valid (unmasked) pixels
+        
+        # 1. Find coordinates of all safe pixels (where mask is False)
+        # np.where returns a tuple of arrays (rows, cols)
+        valid_rows, valid_cols = np.where(~exclusion_mask)
+        
+        n_valid = len(valid_rows)
+        
+        if n_valid == 0:
+            print("Warning: No valid pixels available for injection! (Mask covers entire image)")
+            return image
+            
+        # 2. Randomly select indices from the list of valid coordinates
+        chosen_indices = rng.integers(0, n_valid, size=n_events)
+        
+        # 3. Retrieve the specific row/col coordinates for those indices
+        r_coords = valid_rows[chosen_indices]
+        c_coords = valid_cols[chosen_indices]
+        
+        # 4. Inject intensity
+        np.add.at(image, (r_coords, c_coords), intensity)
+    
+    return image
+
+
+
+def generate_halo_mask(image, threshold=100, radius=60):
+    import numpy as np
+    from skimage.morphology import disk, dilation  # Updated import
+    
+    # 1. Find pixels that exceed the threshold
+    hot_pixels = image > threshold
+    
+    # 2. Create a circular footprint
+    footprint = disk(radius)
+    
+    # 3. Dilate the hot pixels
+    # dilation() handles boolean inputs automatically
+    mask = dilation(hot_pixels, footprint)
+    
+    return mask
+
+
+def get_cluster(proc, min_pixs=2, max_pixs=None, min_total_value=3,max_total_value = None, return_count = False, return_median= False):#, min_max_value=None
+    from scipy.stats import binned_statistic
+    import numpy as np
+    from cv2 import connectedComponents
+    
+    m = proc > 0.7
+    
+    # connectedComponents returns the number of labels including the background (label 0)
+    num_labels, clusters = connectedComponents(m.astype(np.uint8))
+    
+    # Subtract 1 to ignore the background
+    max_index = num_labels - 1
+    
+    # --- FIX: Handle case with no clusters ---
+    if max_index == 0:
+        if return_count:
+            return 0
+        if return_median:
+            return np.nan # Or 0, depending on your preference
+        return np.zeros_like(proc, dtype=bool) # Return empty mask
+    # -----------------------------------------
+
+    all_clusters = clusters.flatten()
+    all_values = proc.flatten()
+    
+    counts, bins, binned = binned_statistic(all_clusters, all_values, 'count', bins=max_index,
+                                            range=(1, max_index + 1))
+    sums, bins, binned = binned_statistic(all_clusters, all_values, 'sum', bins=max_index, range=(1, max_index + 1))
+    
+    bins = bins[:-1]
+    
+    if max_pixs is not None:
+        conditions = (counts >= min_pixs) & (sums >= min_total_value) & (counts <= max_pixs)
+    else: 
+        conditions = (counts >= min_pixs) & (sums >= min_total_value)
+        
+    if max_total_value is not None:
+        conditions = conditions & (sums <= max_total_value)
+        
+    if return_count:
+        return np.count_nonzero(conditions)
+    if return_median:
+        # Check if conditions is not empty to avoid warnings/errors
+        valid_sums = sums[conditions]
+        if len(valid_sums) == 0:
+            return np.nan
+        return np.median(valid_sums)
+        
+    cond_bins = bins[conditions]
+
+    layer = np.isin(clusters, cond_bins)
+    return layer
+        
+
+def ratio_pixels(m, yx, action = None):
+    import numpy as np
+    arr = None
+    if type(yx) == int and yx in [8, 9]:
+        arr = [
+            (0, 0),
+            (1, 0),
+            (-1, 0),
+            (1, 1),
+            (- 1, - 1),
+            (0, - 1),
+            (0, 1),
+            (1, - 1),
+            (- 1, + 1)
+        ]
+        if yx == 8:
+            arr = arr[1:]  # drop [0,0]
+    if type(yx) is dict:
+        radii = yx['radius']
+        from itertools import permutations
+        arr = list(permutations(list(range(-radii, radii + 1)) * 2, 2))
+
+    if type(yx) not in [int, dict]:
+        if len(yx) != 2 or type(yx[0]) in [np.ndarray, list]:
+            arr = yx
+
+    if arr is not None:
+        comb = [ratio_pixels(m, xy) for xy in arr]
+        if action is None:
+            return comb
+        from functools import reduce
+        if action in ['|', 'or', 'OR']:
+            return reduce(lambda a, b: a | b, comb)
+        if action in ['&', 'and', 'AND']:
+            return reduce(lambda a, b: a & b, comb)
+        if action in ['+']:
+            return reduce(lambda a, b: a + b, comb)
+        if action in ['-']:
+            return reduce(lambda a, b: a - b, comb)
+        if action in ['stack into 3d matrix', '3d']:
+            return np.dstack(comb)
+
+    m = np.array(m)
+    ry, rx = yx
+    from numpy import vstack, hstack
+    def extra(line):
+        line = line.copy()
+        if line.dtype == bool:
+            line[:] = False
+        else:
+            line[:] = -1
+        return line
+    rm2 = m
+    if ry < 0:
+        rm2 = vstack([extra(np.zeros((abs(ry), rm2.shape[1]), dtype=rm2.dtype)), rm2])
+    elif ry > 0:
+        rm2 = m[ry:]
+    if rx < 0:
+        rm2 = hstack([extra(np.zeros((rm2.shape[0], abs(rx)), dtype=rm2.dtype)), rm2])
+    if rx > 0:
+        rm2 = rm2[:, rx:]
+    rm2 = rm2[:m.shape[0], :m.shape[1]]
+    if rm2.shape[0] < m.shape[0]:
+        rm2 = vstack([rm2, extra(np.zeros((m.shape[0] - rm2.shape[0], rm2.shape[1]), dtype=rm2.dtype))])
+    if rm2.shape[1] < m.shape[1]:
+        rm2 = hstack([rm2, extra(np.zeros((rm2.shape[0], m.shape[1]-rm2.shape[1]), dtype=rm2.dtype))])
+    if rm2 is m:
+        rm2 = m.copy()
+    return rm2
 
 
 class CCD:
     def __init__(self,tpix_horizontal,tpix_vertical,tau_weights, tau_values):
+        import numpy as np
         # self.original_image = np.copy(image_array)
         # self.exposure_images = np.zeros_like(sample_image,dtype=float)
         # self.exposure_images = []
@@ -321,6 +481,7 @@ class CCD:
     #     return current_image
 
     def charge_trap_interaction(self, current_image, dt):
+        import numpy as np
         # --- OPTIMIZATION 2: SPARSE INTERACTION ---
         
         # 1. Extract charge ONLY at trap locations
@@ -366,7 +527,9 @@ class CCD:
 
 
     def take_fake_image(self,exposure_time_hours,radius=60):
-        from skimage.morphology import disk, binary_dilation
+        import numpy as np
+        from utils import approximate_electronize,get_qdata
+        # from skimage.morphology import disk, binary_dilation
 
 
         exp = exposure_time_hours * 3600
@@ -398,14 +561,14 @@ class CCD:
         q0 =approximate_electronize(q0,400)
         q0_blank= transplant_clusters(q0.T, target_shape=(self.nrow_quad, self.ncol_quad),count_threshold=100, max_aspect_ratio=3.0,radius=radius,exposure=exp)
 
-        footprint = disk(radius)
+        # footprint = disk(radius)
 
-        exclusion_mask = binary_dilation(q0_blank > 0, footprint)
-
-
+        # exclusion_mask = binary_dilation(q0_blank > 0, footprint)
 
 
-        q0_fake = inject_single_e(q0_blank, n_events=n_singlee_events, intensity=1,exclusion_mask=exclusion_mask)
+
+
+        q0_fake = inject_single_e(q0_blank, n_events=n_singlee_events, intensity=1,exclusion_mask=None)
         self.no_trap_images.append(q0_fake)
 
         self.ccd_state += q0_fake
@@ -470,6 +633,7 @@ class CCD:
 
 
     def simulate_readout(self):
+        import numpy as np
 
         
         print(f"Starting Readout...")
@@ -522,36 +686,5 @@ class CCD:
 
 
 
-# def simulate_readout(image,readout_time_hours = 7,tpix_horizontal,tpix_vertical):
-#     total_seconds = readout_time_hours *3600
-#     npix = image.shape[0] * image.shape[1]
-#     rows,cols = image.shape
-#     for r in range(rows):
-#         serial_register = image[-1, :].copy()
-#         image_area[0, :] = 0.0
 
-# CCDTest.simulate_readout()
-
-
-import pickle
-for r in range(1,10):
-    filename = f'ccd_traps_run{r}.pkl'
-
-    CCDTest = CCD(tpix,tpix_vertical,tau_weights,tau_values)
-
-    for i in tqdm(range(100)):
-        CCDTest.take_fake_image(0) #0h exposure
-        CCDTest.take_fake_image(4) #4h exposure
-        CCDTest.take_fake_image(6) #6h exposure
-        CCDTest.take_fake_image(10) #10h exposure
-
-        CCDTest.take_fake_image(20) #20h exposure
-    with open(filename,'wb') as f:
-        pickle.dump(CCDTest,f)
-        
-    del CCDTest
-
-        # counts1e_notraps.append(counts_1e_og)
-        # counts1e_traps.append(counts_1e_trap)
-    
 
