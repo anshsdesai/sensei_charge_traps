@@ -171,6 +171,7 @@ def crop_numpy_array(array: np.ndarray, center: tuple, size: tuple) -> np.ndarra
 def transplant_clusters(source_image, target_shape=(520, 3200), 
                                     count_threshold=20, max_aspect_ratio=3.0, 
                                     radius=20,exposure=72000,scale_factor = 1):
+    from skimage.morphology import dilation, disk
     
     # 1. Label and Measure
     labeled_array, num_features = ndimage.label(source_image > 0)
@@ -229,10 +230,16 @@ def transplant_clusters(source_image, target_shape=(520, 3200),
         local_block = source_image[expanded_slice]
         local_labels = labeled_array[expanded_slice]
         
-        # --- DILATION ---
         specific_cluster_mask = (local_labels == label_id)
-        dilated_mask = ndimage.binary_dilation(specific_cluster_mask, iterations=radius)
+        
+        # REPLACEMENT HERE:
+        # 1. Create the footprint (structuring element) for the radius
+        # specific_cluster_mask is boolean, so dilation works as a binary dilation
+        footprint = disk(radius) 
+        dilated_mask = dilation(specific_cluster_mask, footprint)
+        
         final_cluster_chunk = local_block * dilated_mask
+        
         
         # --- PLACEMENT ---
         h, w = final_cluster_chunk.shape
@@ -557,34 +564,17 @@ def comparable(val1,val2,tolerance=1000):
 
 def generate_halo_mask(image, threshold=100, radius=60):
     import numpy as np
-    from skimage.morphology import disk, binary_dilation
-    """
-    Creates a mask where pixels > threshold are centers of circular masks.
+    from skimage.morphology import disk, dilation  # Updated import
     
-    Parameters:
-    -----------
-    image : np.ndarray
-        The input image.
-    threshold : float
-        Pixels above this value will trigger the mask.
-    radius : int
-        The radius of the circular mask to draw around each hot pixel.
-        
-    Returns:
-    --------
-    mask : np.ndarray (bool)
-        Boolean mask where True indicates the masked regions.
-    """
     # 1. Find pixels that exceed the threshold
     hot_pixels = image > threshold
     
-    # 2. Create a circular footprint (structural element)
-    # This defines the shape that will be expanded around the True pixels
+    # 2. Create a circular footprint
     footprint = disk(radius)
     
     # 3. Dilate the hot pixels
-    # This expands the 'True' regions by the radius of the footprint
-    mask = binary_dilation(hot_pixels, footprint)
+    # dilation() handles boolean inputs automatically
+    mask = dilation(hot_pixels, footprint)
     
     return mask
 
