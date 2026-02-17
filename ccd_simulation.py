@@ -208,18 +208,23 @@ def inject_single_e(image, n_events=100, intensity=1, exclusion_mask=None):
 
 
 def generate_halo_mask(image, threshold=100, radius=60):
-    import numpy as np
-    from skimage.morphology import disk, dilation  # Updated import
+    from scipy.ndimage import distance_transform_edt
     
     # 1. Find pixels that exceed the threshold
     hot_pixels = image > threshold
     
-    # 2. Create a circular footprint
-    footprint = disk(radius)
+    # 2. Compute distance from every pixel to the nearest hot pixel
+    # distance_transform_edt calculates the distance from non-zero pixels 
+    # to the nearest zero pixel.
+    # Therefore, we INVERT the mask: 
+    #   - Hot pixels become 0 (Targets)
+    #   - Background becomes 1 (Source)
+    # The result is a map where every pixel contains its distance to the nearest hot pixel.
+    dist_map = distance_transform_edt(~hot_pixels)
     
-    # 3. Dilate the hot pixels
-    # dilation() handles boolean inputs automatically
-    mask = dilation(hot_pixels, footprint)
+    # 3. Threshold the distance map
+    # Pixels with distance <= radius are within the halo.
+    mask = dist_map <= radius
     
     return mask
 
