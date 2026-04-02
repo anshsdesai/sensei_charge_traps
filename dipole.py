@@ -877,3 +877,60 @@ def plotRandomDipoleSpectra(fit_dipole_spectra,quads,n=10):
             plt.show()
             plt.close()
             
+
+
+def monte_carlo_distance_histograms(
+    n_points,
+    grid_width,
+    grid_height,
+    num_samples=1000,
+    num_bins=100,
+    confidence_level=0.90,
+    spline_smoothing=0.5,  # Lower = smoother
+    return_spline=True
+):
+    
+    """
+    Monte Carlo simulation to estimate the distribution of pairwise distances
+    for randomly distributed coordinates in a bounded grid.
+    
+    Returns:
+        bin_centers: centers of distance bins
+        mean_hist: mean histogram over samples
+        ci_lower: lower bound of confidence interval
+        ci_upper: upper bound of confidence interval
+        spline (optional): spline fit of mean histogram
+    """
+    from scipy.spatial.distance import pdist
+    from scipy.interpolate import UnivariateSpline
+    from tqdm.autonotebook import tqdm
+
+    montecarlo_hists = []
+    
+    max_distance = np.hypot(grid_width, grid_height)
+    bin_edges = np.linspace(0, max_distance, num_bins + 1)
+    bin_centers = 0.5 * (bin_edges[:-1] + bin_edges[1:])
+    
+    for _ in tqdm(range(num_samples), desc="Monte Carlo simulation"):
+        random_points = np.column_stack((
+            np.random.uniform(0, grid_width, n_points),
+            np.random.uniform(0, grid_height, n_points)
+        ))
+        distances = pdist(random_points)
+        hist, _ = np.histogram(distances, bins=bin_edges, density=True)
+        montecarlo_hists.append(hist)
+
+    montecarlo_hists = np.array(montecarlo_hists)
+    mean_hist = montecarlo_hists.mean(axis=0)
+
+    # Compute confidence intervals
+    lower_percentile = (1 - confidence_level) / 2 * 100
+    upper_percentile = (1 + confidence_level) / 2 * 100
+    ci_lower = np.percentile(montecarlo_hists, lower_percentile, axis=0)
+    ci_upper = np.percentile(montecarlo_hists, upper_percentile, axis=0)
+
+    if return_spline:
+        spline = UnivariateSpline(bin_centers, mean_hist, s=spline_smoothing)
+        return bin_centers, mean_hist, ci_lower, ci_upper,montecarlo_hists, spline
+    else:
+        return bin_centers, mean_hist, ci_lower, ci_upper,montecarlo_hists

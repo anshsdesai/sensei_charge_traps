@@ -718,16 +718,22 @@ def ratio_pixels(m, yx, action = None):
 
 
 class CCD:
-    def __init__(self,tpix_horizontal,tpix_vertical,tau_weights, tau_values):
+    def __init__(self,tpix_horizontal,tpix_vertical,tau_weights, tau_values,runconditions='minos'):
         import numpy as np
         # self.original_image = np.copy(image_array)
         # self.exposure_images = np.zeros_like(sample_image,dtype=float)
         # self.exposure_images = []
         self.tpix_horizontal = tpix_horizontal
         self.tpix_vertical = tpix_vertical
+        self.runconditions = runconditions
+        if runconditions == 'snolab':
+            print("Using snolab run conditions, assuming 2x less high energy events")
 
-        self.reconstructed_images = []
+        # Raw images are omitted by default to save RAM but can be explicitly requested
+        self.reconstructed_images = [] 
         self.no_trap_images = []
+        self.trap_bitmasks = []
+        self.notrap_bitmasks = []
         self.exposures = []
 
         self.single_e_counts = []
@@ -899,7 +905,7 @@ class CCD:
 
 
 
-    def take_fake_image(self,exposure_time_hours,radius=60):
+    def take_fake_image(self,exposure_time_hours,radius=60,store_image=False):
         import numpy as np
         from utils import approximate_electronize,get_qdata
         # from skimage.morphology import disk, binary_dilation
@@ -934,7 +940,10 @@ class CCD:
         q0 = get_qdata(file,0)
 
         q0 =approximate_electronize(q0,400)
-        q0_blank= transplant_clusters(q0.T, target_shape=(self.nrow_quad, self.ncol_quad),count_threshold=100, max_aspect_ratio=3.0,radius=radius,exposure=exp)
+        if self.runconditions == 'minos':
+            q0_blank= transplant_clusters(q0.T, target_shape=(self.nrow_quad, self.ncol_quad),count_threshold=100, max_aspect_ratio=3.0,radius=radius,exposure=exp)
+        elif self.runconditions == 'snolab':
+            q0_blank= transplant_clusters(q0.T, target_shape=(self.nrow_quad, self.ncol_quad),count_threshold=100, max_aspect_ratio=3.0,radius=radius,exposure=exp/2)
 
         # footprint = disk(radius)
 
@@ -944,7 +953,7 @@ class CCD:
 
 
         q0_fake = inject_single_e(q0_blank, n_events=n_singlee_events, intensity=1,exclusion_mask=None)
-        self.no_trap_images.append(q0_fake)
+        # self.no_trap_images.append(q0_fake)
 
         self.ccd_state += q0_fake
         # if len(self.exposures) > 0:
@@ -954,9 +963,29 @@ class CCD:
             
         # exp_image = np.zeros_like(q0_fake,dtype=float)
 
-        self.simulate_readout()
+        # self.simulate_readout()
+        img_trap = self.simulate_readout()
+        img_notrap = q0_fake
+        
+        if store_image:
+            self.reconstructed_images.append(img_trap)
+            self.no_trap_images.append(img_notrap)
 
         
+        # --- MEMORY OPTIMIZATION: Compute local masks on the fly ---
+        BIT_BASE1E, BIT_HALO, BIT_BLEED = 1, 2, 4
+        
+        b_trap = np.zeros((self.nrow_quad, self.ncol_quad), dtype=np.uint8)
+        b_trap[get_cluster(img_trap, min_pixs=1, max_pixs=1, min_total_value=1, max_total_value=1)] |= BIT_BASE1E
+        b_trap[generate_halo_mask(img_trap, threshold=100, radius=60)] |= BIT_HALO
+        b_trap[generate_column_bleed_mask(img_trap, threshold=100, direction='up')] |= BIT_BLEED
+        self.trap_bitmasks.append(b_trap)
+        
+        b_notrap = np.zeros((self.nrow_quad, self.ncol_quad), dtype=np.uint8)
+        b_notrap[get_cluster(img_notrap, min_pixs=1, max_pixs=1, min_total_value=1, max_total_value=1)] |= BIT_BASE1E
+        b_notrap[generate_halo_mask(img_notrap, threshold=100, radius=60)] |= BIT_HALO
+        b_notrap[generate_column_bleed_mask(img_notrap, threshold=100, direction='up')] |= BIT_BLEED
+        self.notrap_bitmasks.append(b_notrap)
 
         #simulate a clear
         self.ccd_state *= 0
@@ -973,43 +1002,15 @@ class CCD:
         from itertools import combinations
         
         print("\n--- Starting Masking ---")
-        n_images = len(self.reconstructed_images)
+        n_images = len(self.trap_bitmasks)
         shape = (self.nrow_quad, self.ncol_quad)
         
-        trap_local_masks = []
-        notrap_local_masks = []
+
+
+        BIT_BASE1E, BIT_HALO, BIT_BLEED, BIT_HOTCOL, BIT_HOTPIX = 1, 2, 4, 8, 16
         
-        base_1e_trap_cache = []
-        base_1e_notrap_cache = []
+        print("1. Aggregating statistics using Split-Sample (A/B)...")
 
-        # =====================================================================
-        # STEP 1: Compute Local Masks & Cache Base 1e- Events
-        # =====================================================================
-        print("1. Computing local masks and caching 1e- clusters...")
-        for i in range(n_images):
-            # --- Trap Images ---
-            img_trap = self.reconstructed_images[i]
-            halo_trap = generate_halo_mask(img_trap, threshold=100, radius=60)
-            bleed_trap = generate_column_bleed_mask(img_trap, threshold=100, direction='up') 
-            trap_local_masks.append({'Halo': halo_trap, 'Bleed': bleed_trap})
-            
-            base_1e_trap = get_cluster(img_trap, min_pixs=1, max_pixs=1, min_total_value=1, max_total_value=1)
-            base_1e_trap_cache.append(base_1e_trap)
-            
-            # --- No-Trap Images ---
-            img_notrap = self.no_trap_images[i]
-            halo_notrap = generate_halo_mask(img_notrap, threshold=100, radius=60)
-            bleed_notrap = generate_column_bleed_mask(img_notrap, threshold=100, direction='up')
-            notrap_local_masks.append({'Halo': halo_notrap, 'Bleed': bleed_notrap})
-            
-            base_1e_notrap = get_cluster(img_notrap, min_pixs=1, max_pixs=1, min_total_value=1, max_total_value=1)
-            base_1e_notrap_cache.append(base_1e_notrap)
-
-
-        # =====================================================================
-        # STEP 2: Aggregate Statistics (Split-Sample A and B)
-        # =====================================================================
-        print("2. Aggregating statistics using Split-Sample (A/B)...")
         unique_exposures = np.unique(self.exposures)
         
         # We will build independent data lists for Set A and Set B
@@ -1035,16 +1036,18 @@ class CCD:
                 
                 for i in indices:
                     # Traps
-                    u_t = ~(trap_local_masks[i]['Halo'] | trap_local_masks[i]['Bleed'])
-                    b1e_t = base_1e_trap_cache[i]
+                    b_t = self.trap_bitmasks[i]
+                    u_t = (b_t & (BIT_HALO | BIT_BLEED)) == 0
+                    b1e_t = (b_t & BIT_BASE1E) > 0
                     t_denom_c += np.sum(u_t, axis=0)
                     t_hits_c += np.sum(b1e_t & u_t, axis=0)
                     t_denom_p += u_t.astype(int)
                     t_hits_p += (b1e_t & u_t).astype(int)
                     
                     # No Traps
-                    u_nt = ~(notrap_local_masks[i]['Halo'] | notrap_local_masks[i]['Bleed'])
-                    b1e_nt = base_1e_notrap_cache[i]
+                    b_nt = self.notrap_bitmasks[i]
+                    u_nt = (b_nt & (BIT_HALO | BIT_BLEED)) == 0
+                    b1e_nt = (b_nt & BIT_BASE1E) > 0
                     nt_denom_c += np.sum(u_nt, axis=0)
                     nt_hits_c += np.sum(b1e_nt & u_nt, axis=0)
                     nt_denom_p += u_nt.astype(int)
@@ -1067,90 +1070,56 @@ class CCD:
             notrap_pix_data_B.append((np.stack((notrap_B[2], notrap_B[3]), axis=-1), f"NoTrapPix_{exp}s_B"))
 
 
-        # =====================================================================
-        # STEP 3: Compute Cross-Masks
-        # =====================================================================
-        print("3. Computing global hot pixel/column masks (Cross-Validation)...")
+        print("2. Computing global hot pixel/column masks (Cross-Validation)...")
         
         def compute_masks(col_data, pix_data):
             bad_cols, _, _ = findBadCells(col_data, nCells=self.ncol_quad)
-            for data_idx in range(len(unique_exposures)):
-                if len(bad_cols) > 0: pix_data[data_idx][0][:, bad_cols, :] = 0
+            if len(bad_cols) > 0:
+                for item in pix_data:
+                    item[0][:, bad_cols, :] = 0
             bad_pix_flat, _, _ = findBadCells(pix_data, nCells=self.nrow_quad*self.ncol_quad)
             new_cols, final_pix = merge_hot_pixels_to_columns(bad_pix_flat, self.nrow_quad)
             
-            mask_col = np.zeros(shape, dtype=bool)
-            if len(bad_cols) > 0 or len(new_cols) > 0:
-                mask_col[:, list(set(bad_cols) | set(new_cols))] = True
-                
-            mask_pix = np.zeros(shape, dtype=bool)
-            for r, c in final_pix: mask_pix[r, c] = True
-                
-            return mask_col, mask_pix
+            all_bad_cols = list(set(bad_cols) | set(new_cols))
+            return all_bad_cols, final_pix
+        
+        bad_cols_tA, bad_pix_tA = compute_masks(trap_col_data_A, trap_pix_data_A)
+        bad_cols_ntA, bad_pix_ntA = compute_masks(notrap_col_data_A, notrap_pix_data_A)
 
-        # Compute Mask A (using Set A data)
-        trap_col_mask_A, trap_pix_mask_A = compute_masks(trap_col_data_A, trap_pix_data_A)
-        notrap_col_mask_A, notrap_pix_mask_A = compute_masks(notrap_col_data_A, notrap_pix_data_A)
+        bad_cols_tB, bad_pix_tB = compute_masks(trap_col_data_B, trap_pix_data_B)
+        bad_cols_ntB, bad_pix_ntB = compute_masks(notrap_col_data_B, notrap_pix_data_B)
 
-        # Compute Mask B (using Set B data)
-        trap_col_mask_B, trap_pix_mask_B = compute_masks(trap_col_data_B, trap_pix_data_B)
-        notrap_col_mask_B, notrap_pix_mask_B = compute_masks(notrap_col_data_B, notrap_pix_data_B)
-
+        
         # --- CROSS-APPLY MASKS ---
         for exp in unique_exposures:
             all_idx = np.where(np.array(self.exposures) == exp)[0]
             idx_A = all_idx[0::2]
             idx_B = all_idx[1::2]
+
+            def apply_masks(indices, bitmasks, bad_cols, bad_pix):
+                for i in indices:
+                    if bad_cols:
+                        bitmasks[i][:, bad_cols] |= BIT_HOTCOL
+                    if bad_pix:
+                        rs, cs = zip(*bad_pix)
+                        bitmasks[i][rs, cs] |= BIT_HOTPIX
             
             # Apply Mask B to Images A
-            for i in idx_A:
-                trap_local_masks[i]['HotColumn'] = trap_col_mask_B
-                trap_local_masks[i]['HotPixel'] = trap_pix_mask_B
-                notrap_local_masks[i]['HotColumn'] = notrap_col_mask_B
-                notrap_local_masks[i]['HotPixel'] = notrap_pix_mask_B
+            apply_masks(idx_A, self.trap_bitmasks, bad_cols_tB, bad_pix_tB)
+            apply_masks(idx_A, self.notrap_bitmasks, bad_cols_ntB, bad_pix_ntB)
 
             # Apply Mask A to Images B
-            for i in idx_B:
-                trap_local_masks[i]['HotColumn'] = trap_col_mask_A
-                trap_local_masks[i]['HotPixel'] = trap_pix_mask_A
-                notrap_local_masks[i]['HotColumn'] = notrap_col_mask_A
-                notrap_local_masks[i]['HotPixel'] = notrap_pix_mask_A
+            apply_masks(idx_B, self.trap_bitmasks, bad_cols_tA, bad_pix_tA)
+            apply_masks(idx_B, self.notrap_bitmasks, bad_cols_ntA, bad_pix_ntA)
 
+        print("3. Evaluating all mask permutations and extracting counts...")
 
-        # =====================================================================
-        # STEP 3.5: Generate Bitmasks for Visual Inspection
-        # =====================================================================
-        self.trap_bitmasks = []
-        self.notrap_bitmasks = []
-        
-        BIT_HALO, BIT_BLEED, BIT_HOTCOL, BIT_HOTPIX = 2, 4, 8, 16 
-        
-        for i in range(n_images):
-            # Trap Bitmask
-            b_trap = np.zeros(shape, dtype=np.uint8)
-            b_trap |= trap_local_masks[i]['Halo'].astype(np.uint8) * BIT_HALO
-            b_trap |= trap_local_masks[i]['Bleed'].astype(np.uint8) * BIT_BLEED
-            b_trap |= trap_local_masks[i]['HotColumn'].astype(np.uint8) * BIT_HOTCOL
-            b_trap |= trap_local_masks[i]['HotPixel'].astype(np.uint8) * BIT_HOTPIX
-            self.trap_bitmasks.append(b_trap)
-
-            # No-Trap Bitmask
-            b_notrap = np.zeros(shape, dtype=np.uint8)
-            b_notrap |= notrap_local_masks[i]['Halo'].astype(np.uint8) * BIT_HALO
-            b_notrap |= notrap_local_masks[i]['Bleed'].astype(np.uint8) * BIT_BLEED
-            b_notrap |= notrap_local_masks[i]['HotColumn'].astype(np.uint8) * BIT_HOTCOL
-            b_notrap |= notrap_local_masks[i]['HotPixel'].astype(np.uint8) * BIT_HOTPIX
-            self.notrap_bitmasks.append(b_notrap)
-
-
-        # =====================================================================
-        # STEP 4: Evaluate Permutations and Extract Counts
-        # =====================================================================
-        print("4. Evaluating all mask permutations and extracting counts...")
         self.stats_trap = {}
         self.stats_notrap = {}
         
-        mask_keys = ['Halo', 'Bleed', 'HotColumn', 'HotPixel']
+        mask_map = {'Halo': BIT_HALO, 'Bleed': BIT_BLEED, 'HotColumn': BIT_HOTCOL, 'HotPixel': BIT_HOTPIX}
+        mask_keys = list(mask_map.keys())
+
         all_combos = []
         
         for L in range(0, len(mask_keys) + 1):
@@ -1161,41 +1130,26 @@ class CCD:
                 self.stats_notrap[combo_name] = {'counts': [], 'unmasked_pix': []}
                 
         for i in range(n_images):
-            # --- Trap Evaluation ---
-            masks_trap = trap_local_masks[i]
-            base_1e_mask_trap = base_1e_trap_cache[i]
+            b_trap = self.trap_bitmasks[i]
+            b_notrap = self.notrap_bitmasks[i]
             
             for subset in all_combos:
                 combo_name = "+".join(subset) if subset else "None"
+                mask_bits = sum(mask_map[name] for name in subset) if subset else 0
                 
-                if not subset:
-                    unmasked_pix = shape[0] * shape[1]
-                    surviving_counts = np.sum(base_1e_mask_trap)
-                else:
-                    combined_mask = np.logical_or.reduce([masks_trap[name] for name in subset])
-                    surviving_counts = np.sum(base_1e_mask_trap & ~combined_mask)
-                    unmasked_pix = combined_mask.size - np.sum(combined_mask)
+                # Trap Evaluation
+                surviving_t = ((b_trap & BIT_BASE1E) > 0) & ((b_trap & mask_bits) == 0)
+                unmasked_t = (b_trap & mask_bits) == 0
                 
-                self.stats_trap[combo_name]['counts'].append(surviving_counts)
-                self.stats_trap[combo_name]['unmasked_pix'].append(unmasked_pix)
+                self.stats_trap[combo_name]['counts'].append(np.count_nonzero(surviving_t))
+                self.stats_trap[combo_name]['unmasked_pix'].append(np.count_nonzero(unmasked_t))
 
-            # --- No-Trap Evaluation ---
-            masks_notrap = notrap_local_masks[i]
-            base_1e_mask_notrap = base_1e_notrap_cache[i]
-            
-            for subset in all_combos:
-                combo_name = "+".join(subset) if subset else "None"
+                # No-Trap Evaluation
+                surviving_nt = ((b_notrap & BIT_BASE1E) > 0) & ((b_notrap & mask_bits) == 0)
+                unmasked_nt = (b_notrap & mask_bits) == 0
                 
-                if not subset:
-                    unmasked_pix = shape[0] * shape[1]
-                    surviving_counts = np.sum(base_1e_mask_notrap)
-                else:
-                    combined_mask = np.logical_or.reduce([masks_notrap[name] for name in subset])
-                    surviving_counts = np.sum(base_1e_mask_notrap & ~combined_mask)
-                    unmasked_pix = combined_mask.size - np.sum(combined_mask)
-                
-                self.stats_notrap[combo_name]['counts'].append(surviving_counts)
-                self.stats_notrap[combo_name]['unmasked_pix'].append(unmasked_pix)
+                self.stats_notrap[combo_name]['counts'].append(np.count_nonzero(surviving_nt))
+                self.stats_notrap[combo_name]['unmasked_pix'].append(np.count_nonzero(unmasked_nt))
 
         print("--- Post-Run Analysis Complete ---")
     # def process_run(self):
@@ -1652,13 +1606,35 @@ class CCD:
         result_reconstructed= result_flat.reshape(rows, cols)
         result_reconstructed = np.flipud(np.fliplr(result_reconstructed))
 
-        self.reconstructed_images.append(result_reconstructed)
+        # self.reconstructed_images.append(result_reconstructed)
 
-        return 
-
-
+        return result_reconstructed
 
 
+def run_single_trial(r, tpix, tpix_vertical, tau_weights, tau_values, runconditions='snolab'):
+    """This function contains everything needed for a single trial"""
+    import pickle
+    filename = f'ccd_traps_run{r}.pkl'
 
+    CCDTest = CCD(tpix, tpix_vertical, tau_weights, tau_values,runconditions=runconditions)
 
+    for i in range(100): 
+        CCDTest.take_fake_image(0)  # 0h exposure
+        CCDTest.take_fake_image(4)  # 4h exposure
+        CCDTest.take_fake_image(6)  # 6h exposure
+        CCDTest.take_fake_image(10) # 10h exposure
+        CCDTest.take_fake_image(20) # 20h exposure
+        
+    CCDTest.process_run()
 
+    # Memory Cleanup
+    CCDTest.reconstructed_images = []
+    CCDTest.no_trap_images = []
+    CCDTest.trap_bitmasks = []
+    CCDTest.notrap_bitmasks = []
+    CCDTest.ccd_state = [] 
+
+    with open(filename, 'wb') as f:
+        pickle.dump(CCDTest, f)
+        
+    return r
