@@ -2,6 +2,7 @@ from astropy.time import Time
 #use a snolab image and assume this time is valid for pixel times
 from scipy.stats import binom
 import numpy as np
+from numba import njit
 from scipy.stats import poisson
 from numpy.lib.stride_tricks import as_strided
 
@@ -715,6 +716,61 @@ def ratio_pixels(m, yx, action = None):
     if rm2 is m:
         rm2 = m.copy()
     return rm2
+
+@njit
+def seed_numba(seed_value):
+    """Seeds Numba's internal PRNG. Must be called from inside a JIT function."""
+    np.random.seed(seed_value)
+
+@njit
+def fast_readout_numba(image, exp_acc, tpix_vertical, trap_rows, trap_cols, trap_taus, trapped_charge):
+    """
+    JIT-compiled C-speed readout loop. Replaces the Python overhead 
+    of iteratively shifting arrays and evaluating charge trap states.
+    """
+    rows, cols = image.shape
+    n_traps = len(trap_taus)
+    p_release = 1.0 - np.exp(-tpix_vertical / trap_taus)
+    
+    output_stream = np.zeros(rows * cols, dtype=np.float64)
+    out_idx = 0
+    
+    for r in range(rows):
+        # 1. Readout last row into output stream (reversed)
+        for c in range(cols - 1, -1, -1):
+            output_stream[out_idx] = image[rows - 1, c]
+            out_idx += 1
+            
+        # 2. Shift image down (moving row 0 to 1, etc.)
+        for sr in range(rows - 1, 0, -1):
+            for sc in range(cols):
+                image[sr, sc] = image[sr - 1, sc]
+        for sc in range(cols):
+            image[0, sc] = 0.0
+            
+        # 3. Update exposure accumulator (excluding the shifted out rows)
+        limit = rows - 1 - r
+        for sr in range(limit):
+            for sc in range(cols):
+                exp_acc[sr, sc] += tpix_vertical
+                
+        # 4. Trap interactions
+        for i in range(n_traps):
+            tr = trap_rows[i]
+            tc = trap_cols[i]
+            
+            # Capture
+            if image[tr, tc] >= 1.0 and trapped_charge[i] == 0.0:
+                image[tr, tc] -= 1.0
+                trapped_charge[i] += 1.0
+                
+            # Release
+            if trapped_charge[i] > 0.0:
+                if np.random.random() < p_release[i]:
+                    image[tr, tc] += 1.0
+                    trapped_charge[i] -= 1.0
+                    
+    return output_stream
 
 
 class CCD:
@@ -1567,42 +1623,15 @@ class CCD:
         # print(f"Starting Readout...")
         # image = self.ccd_state
         image = self.ccd_state.copy()
-        serial_register = np.zeros(image.shape[1])
-
-
         rows, cols = image.shape
         
-        output_stream = []
+        # Use the Numba JIT compiled C-loop to eliminate the python iteration bottleneck
+        result_flat = fast_readout_numba(
+            image, self.exposure_accumulator, self.tpix_vertical,
+            self.trap_indices[0], self.trap_indices[1], 
+            self.trap_taus, self.trapped_charge_1d
+        )
 
-        for r in range(rows):
-            serial_register = image[-1, :].copy() #this represents a vertical shift of charge to the serial register
-
-            image[1:, :] = image[:-1, :]
-            image[0, :] = 0.0
-            # line_buffer = []
-            index = int(-1 -r )
-            t2 = self.exposure_accumulator+ self.tpix_vertical 
-            t1 = self.exposure_accumulator
-            dt = t2 - t1
-
-            # image = self.charge_trap_interaction(image,dt)
-            image = self.charge_trap_interaction(image,self.tpix_vertical)
-            self.exposure_accumulator[:index,:] += self.tpix_vertical
-
-
-            #would need this for serial register traps
-            # for c in range(cols):
-            #     # index2 = int(-1 -c)
-            #     val = serial_register[-1]
-            #     serial_register[1:] = serial_register[:-1]
-            #     serial_register[0] = 0.0
-            #     # self.exposure_image[:index,:index2] += self.tpix_horizontal #don't necessarily need to keep track of this, assuming no traps in serial register
-            #     line_buffer.append(val)
-
-            # output_stream.extend(line_buffer)
-            output_stream.extend(serial_register[::-1])
-
-        result_flat = np.array(output_stream)
         result_reconstructed= result_flat.reshape(rows, cols)
         result_reconstructed = np.flipud(np.fliplr(result_reconstructed))
 
@@ -1613,6 +1642,10 @@ class CCD:
 
 def run_single_trial(r, tpix, tpix_vertical, tau_weights, tau_values, runconditions='snolab'):
     """This function contains everything needed for a single trial"""
+    import os
+    # Guarantee a unique PRNG sequence for Numba across all forked child processes
+    seed_numba(os.getpid() + (r * 10000))
+    
     import pickle
     filename = f'ccd_traps_run{r}.pkl'
 

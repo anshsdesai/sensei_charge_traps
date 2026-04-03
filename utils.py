@@ -376,3 +376,62 @@ def comparable(val1,val2,tolerance=1000):
     else:
         return False
 
+import h5py
+import numpy as np
+
+def _save_dict_to_hdf5(group, d):
+    """Recursively saves a dictionary to an HDF5 group."""
+    for key, val in d.items():
+        # Convert key to string, prepending 'temp_' if it's an integer
+        key_str = f"temp_{key}" if isinstance(key, int) else str(key)
+        
+        if isinstance(val, dict):
+            sub_grp = group.create_group(key_str)
+            _save_dict_to_hdf5(sub_grp, val)
+        elif isinstance(val, (list, np.ndarray)):
+            arr = np.array(val)
+            if arr.dtype == object:
+                continue  # Skip arrays of objects to avoid HDF5 TypeError
+            group.create_dataset(key_str, data=arr)
+        elif val is None:
+            group.attrs[key_str] = "NONE_VALUE"
+        else:
+            group.attrs[key_str] = val
+
+def _load_dict_from_hdf5(group):
+    """Recursively loads a dictionary from an HDF5 group."""
+    d = {}
+    for key, item in group.items():
+        orig_key = int(key.split('_')[1]) if key.startswith('temp_') else key
+        if isinstance(item, h5py.Group):
+            d[orig_key] = _load_dict_from_hdf5(item)
+        else:
+            d[orig_key] = item[()] # Extracts datasets to arrays/scalars
+            
+    for key, val in group.attrs.items():
+        orig_key = int(key.split('_')[1]) if key.startswith('temp_') else key
+        d[orig_key] = None if val == "NONE_VALUE" else val
+        
+    return d
+
+def save_spectra_hdf5(spectra_dict, filename='dipole_spectra.h5'):
+    """Saves the nested dipole spectra dictionary to an HDF5 file."""
+    with h5py.File(filename, 'w') as f:
+        for quad, dp_dict in spectra_dict.items():
+            quad_grp = f.create_group(f"quad_{quad}")
+            for dp, temp_dict in dp_dict.items():
+                dp_grp = quad_grp.create_group(f"dp_{dp[0]}_{dp[1]}")
+                _save_dict_to_hdf5(dp_grp, temp_dict)
+
+def load_spectra_hdf5(filename='dipole_spectra.h5'):
+    """Loads the nested dipole spectra dictionary from an HDF5 file."""
+    spectra_dict = {}
+    with h5py.File(filename, 'r') as f:
+        for quad_name, quad_grp in f.items():
+            quad = int(quad_name.split('_')[1])
+            spectra_dict[quad] = {}
+            for dp_name, dp_grp in quad_grp.items():
+                _, x, y = dp_name.split('_')
+                dp = (int(x), int(y))
+                spectra_dict[quad][dp] = _load_dict_from_hdf5(dp_grp)
+    return spectra_dict

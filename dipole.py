@@ -53,9 +53,6 @@ def comparable_perc(a,b,perc=0.3):
     return percent_diff < perc
 
 def findDipoles2(electronized_image,debug=False,useFit=False):
-    import ctypes
-    from ROOT import TH1D, TF1, TCanvas
-
 
     dipole_list = []
 
@@ -72,25 +69,21 @@ def findDipoles2(electronized_image,debug=False,useFit=False):
     var = np.average((mids - histmean)**2, weights=hist)
     histmean = np.round(histmean,2)
     if useFit:
-        image_flat = electronized_image.flatten().astype(np.float64)
-
-        h = TH1D(f"temp",f"Charge", nbins, hist_lower, hist_upper)
-
-        weights = np.ones_like(image_flat)
-        # h.FillN(image_flat.size, image_flat, np.ones(image_flat.size))
-        # Get C-compatible pointers
-        x_ptr = image_flat.ctypes.data_as(ctypes.POINTER(ctypes.c_double))
-        w_ptr = weights.ctypes.data_as(ctypes.POINTER(ctypes.c_double))
-
-        h.FillN(image_flat.size, x_ptr, w_ptr)
-
-        h.Fit("gaus","Q")
-        fit_function = h.GetFunction("gaus")
-        constant = fit_function.GetParameter(0)
-        mean = fit_function.GetParameter(1)
-        sigma = fit_function.GetParameter(2)
+        from scipy.optimize import curve_fit
+        try:
+            # Provide initial guesses: [mean, sigma, constant]
+            p0 = [histmean, np.sqrt(var), np.max(hist)]
+            popt, _ = curve_fit(gauss, mids, hist, p0=p0)
+            mean, sigma, constant = popt
+        except RuntimeError:
+            # Fallback to standard statistics if the fit fails to converge
+            mean = histmean
+            sigma = np.sqrt(var)
+            constant = np.max(hist)
     else:
         sigma= np.sqrt(var)
+        mean = histmean
+        constant = np.max(hist)
         
     sigma_cutoff =(3*sigma)**2
     sigma_cutoff *= -1
@@ -109,28 +102,21 @@ def findDipoles2(electronized_image,debug=False,useFit=False):
 
     image = electronized_image.T -median_charge_per_row
     image = image.T #image with median charge per row subtracted
-    for i in np.arange(1,image.shape[0]):
-
-
-
-        row1 = image[i,:]
-        row0 = image[i-1,:]
-
-        diff = row1 - row0
-        multipl =row1*row0
-        if debug:
-            print(multipl,sigma_cutoff)
-
-        potential_locations = np.where(multipl < sigma_cutoff)[0]
-
-    # potential_dipole_locations = np.where(image < sigma_cutoff)
+    
+    # Fully vectorize the row-by-row product search
+    multipl = image[1:, :] * image[:-1, :]
+    potential_rows, potential_cols = np.where(multipl < sigma_cutoff)
+    actual_rows = potential_rows + 1
+    
+    for r, c in zip(actual_rows, potential_cols):
+        potential_locations = [c] # Preserve loop logic format
 
         if len(potential_locations) == 0:
             continue
         for col in potential_locations:
 
-            coord = (i,col)
-            coord_b = (i - 1,col)
+            coord = (r, col)
+            coord_b = (r - 1, col)
             charge1 = np.abs(image[coord])
             charge2 = np.abs(image[coord_b])
             if debug:
@@ -226,7 +212,7 @@ def getDipoleList2(image_dir,temperatures,goodquads,plot=False):
     for q in goodquads:
         dipole_list = []
         for temperature in temperatures:
-            print(f"temperature: {temperature}")
+            # print(f"temperature: {temperature}")
             dipole_occurrences = defaultdict(set)
             all_dipoles = []
             temp = f'{temperature}k'
@@ -237,10 +223,10 @@ def getDipoleList2(image_dir,temperatures,goodquads,plot=False):
                 fig = plt.figure(figsize=(12,8))
             
             for imagefile in imagefiles:
-                dtph = int(re.findall('dtph\d+_',imagefile)[0][4:-1])
+                dtph = int(re.findall(r'dtph\d+_',imagefile)[0][4:-1])
                 image = get_qdata(imagefile,q)
                 image = crop_qdata(image)#,ylower=500,xlower=100)
-                print(imagefile)
+                # print(imagefile)
                 image = approximate_electronize(image,eval)
                 image_dipoles = findDipoles2(image)
                 for dipole in image_dipoles:
@@ -304,8 +290,8 @@ def getDipoleSpectra2(image_dir,goodquads,full_dipole_coord_list,absolute=True):
 
         for f in tqdm(range(len((imagefiles)))):
             imagef = imagefiles[f]
-            dtph = int(re.findall('dtph\d+_',imagef)[0][4:-1])
-            temp = int(re.findall('_\d+k',imagef)[0][1:-1])
+            dtph = int(re.findall(r'dtph\d+_',imagef)[0][4:-1])
+            temp = int(re.findall(r'_\d+k',imagef)[0][1:-1])
             image = get_qdata(imagef,quad)
             image = crop_qdata(image)
             image = approximate_electronize(image,eval)
@@ -541,7 +527,7 @@ def fitTrapIntensity(full_dipole_dict,useIntensityErr=True,wellBehavedThreshold=
                 #chi2.sf(chi_squared, dof)
                 ss_res = np.sum((intensities - intensity_function(seconds, *popt)) ** 2)
                 ss_tot = np.sum((intensities- np.mean(intensities)) ** 2)
-                r2 = np.abs((1 - (ss_res / ss_tot)))
+                r2 = 1 - (ss_res / ss_tot)
 
 
 
@@ -623,7 +609,7 @@ def fitTrapIntensity(full_dipole_dict,useIntensityErr=True,wellBehavedThreshold=
                 ss_res = np.sum((residuals) ** 2)
 
                 ss_tot = np.sum((np.log(good_taus)- np.mean(np.log(good_taus))) ** 2)
-                r2 = np.abs((1 - (ss_res / ss_tot)))
+                r2 = 1 - (ss_res / ss_tot)
 
                 
                 
@@ -724,7 +710,7 @@ def fitTrapIntensity_cutflow(full_dipole_dict, useIntensityErr=True, wellBehaved
                 p_value = 1 - chi2.cdf(chi_squared, dof)
                 ss_res = np.sum((intensities - intensity_function(seconds, *popt)) ** 2)
                 ss_tot = np.sum((intensities - np.mean(intensities)) ** 2)
-                r2 = np.abs((1 - (ss_res / ss_tot)))
+                r2 = 1 - (ss_res / ss_tot)
 
                 rtol = 0.25
                 goodness_of_fit_test = (r2 < 1 + rtol) & (r2 > 1 - rtol)
@@ -801,7 +787,7 @@ def fitTrapIntensity_cutflow(full_dipole_dict, useIntensityErr=True, wellBehaved
                 p_value = chi2.sf(chi_squared, dof)
                 ss_res = np.sum((residuals) ** 2)
                 ss_tot = np.sum((np.log(good_taus) - np.mean(np.log(good_taus))) ** 2)
-                r2 = np.abs((1 - (ss_res / ss_tot)))
+                r2 = 1 - (ss_res / ss_tot)
 
                 # Energy fit rejection criteria
                 goodness_of_fit = p_value > 0.05
