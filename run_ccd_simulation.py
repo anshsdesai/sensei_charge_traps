@@ -19,7 +19,8 @@ if __name__ == '__main__':
     parser.add_argument('--num_workers', type=int, default=None, help="Number of CPU workers (defaults to max cores - 1).")
     parser.add_argument('--runconditions', type=str, default='minos', choices=['minos', 'snolab'], help="Run conditions configuration to use.")
     parser.add_argument('--binning', type=float, default=1.0, help="Scale factor to divide pixel readout times (simulates binning).")
-    
+    parser.add_argument('--out', type=str, default='./', help="Output directory.")
+    parser.add_argument('--tauhistfile', type=str, default='tau_at_135k_hist.npz', help="the histogram file to used to sample tau values.")
     args = parser.parse_args()
 
     snolab_dir = './snolab_image/'
@@ -48,13 +49,15 @@ if __name__ == '__main__':
     tpix_vertical = (pixel_time_vertical(nsamp, ncol, delayH, delayIped, delayIsig, delaySW, delayRG, delayOG, delayDG) / 15e6) / args.binning
 
     # Load tau distribution for simulation sampling
+    # fname = 'tau_at_135k_hist.npz' if not args.upperlimit  else ''
+    fname = args.tauhistfile
     try:
-        tau_data = np.load('tau_at_135k_hist.npz')
+        tau_data = np.load(fname)
         tau_weights = tau_data['hist']
-        tau_values = tau_data['bin_centers']
-        print("Loaded tau_at_135k_hist.npz successfully.")
+        tau_edges = tau_data['bin_edges']
+        print(f"Loaded {fname} successfully.")
     except FileNotFoundError:
-        print("Error: tau_at_135k_hist.npz not found. Please run run_charge_traps.py first to generate this file.")
+        print(f"Error: {fname} not found. Please run run_charge_traps.py first to generate this file.")
         sys.exit(1)
 
     num_runs = args.num_runs
@@ -73,8 +76,9 @@ if __name__ == '__main__':
                 itertools.repeat(tpix),              # tpix (constant)
                 itertools.repeat(tpix_vertical),     # tpix_vertical (constant)
                 itertools.repeat(tau_weights),       # tau_weights (constant)
-                itertools.repeat(tau_values),        # tau_values (constant)
-                itertools.repeat(args.runconditions) # run conditions (string constant)
+                itertools.repeat(tau_edges),         # tau_edges (constant)
+                itertools.repeat(args.runconditions), # run conditions (string constant)
+                itertools.repeat(args.out) # run conditions (string constant)
             ), 
             total=num_runs, 
             desc="Running Trials"

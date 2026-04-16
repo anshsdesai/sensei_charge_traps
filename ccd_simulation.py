@@ -725,56 +725,66 @@ def seed_numba(seed_value):
 @njit
 def fast_readout_numba(image, exp_acc, tpix_vertical, trap_rows, trap_cols, trap_taus, trapped_charge):
     """
-    JIT-compiled C-speed readout loop. Replaces the Python overhead 
-    of iteratively shifting arrays and evaluating charge trap states.
+    JIT-compiled C-speed readout loop using a stationary padded buffer.
+    Eliminates the O(R^2 C) memory shifting bottleneck.
     """
     rows, cols = image.shape
     n_traps = len(trap_taus)
     p_release = 1.0 - np.exp(-tpix_vertical / trap_taus)
     
+    # 1. Pad image with empty rows at the top to simulate empty space shifting in
+    padded_image = np.zeros((2 * rows, cols), dtype=np.float64)
+    for r in range(rows):
+        for c in range(cols):
+            padded_image[r + rows, c] = image[r, c]
+            
     output_stream = np.zeros(rows * cols, dtype=np.float64)
     out_idx = 0
     
-    for r in range(rows):
-        # 1. Readout last row into output stream (reversed)
+    for t in range(rows):
+        # 2. Readout the row that has reached the bottom
+        read_row = 2 * rows - 1 - t
         for c in range(cols - 1, -1, -1):
-            output_stream[out_idx] = image[rows - 1, c]
+            output_stream[out_idx] = padded_image[read_row, c]
             out_idx += 1
             
-        # 2. Shift image down (moving row 0 to 1, etc.)
-        for sr in range(rows - 1, 0, -1):
-            for sc in range(cols):
-                image[sr, sc] = image[sr - 1, sc]
-        for sc in range(cols):
-            image[0, sc] = 0.0
-            
-        # 3. Update exposure accumulator (excluding the shifted out rows)
-        limit = rows - 1 - r
-        for sr in range(limit):
-            for sc in range(cols):
-                exp_acc[sr, sc] += tpix_vertical
-                
-        # 4. Trap interactions
+        # 3. Trap interactions on the newly shifted pixels
         for i in range(n_traps):
             tr = trap_rows[i]
             tc = trap_cols[i]
             
+            # The pixel that just shifted into the trap's physical row 'tr'
+            current_pixel_row = tr + rows - 1 - t
+            
             # Capture
-            if image[tr, tc] >= 1.0 and trapped_charge[i] == 0.0:
-                image[tr, tc] -= 1.0
+            if padded_image[current_pixel_row, tc] >= 1.0 and trapped_charge[i] == 0.0:
+                padded_image[current_pixel_row, tc] -= 1.0
                 trapped_charge[i] += 1.0
                 
             # Release
             if trapped_charge[i] > 0.0:
                 if np.random.random() < p_release[i]:
-                    image[tr, tc] += 1.0
+                    padded_image[current_pixel_row, tc] += 1.0
                     trapped_charge[i] -= 1.0
                     
+    # 4. Update Exposure Accumulator 
+    # (Vectorized the O(R^2 * C) addition loop into O(R * C))
+    for sr in range(rows):
+        add_val = (rows - 1 - sr) * tpix_vertical
+        if add_val > 0:
+            for sc in range(cols):
+                exp_acc[sr, sc] += add_val
+
+    # 5. Update the CCD state for the next exposure
+    for r in range(rows):
+        for c in range(cols):
+            image[r, c] = padded_image[r, c]
+            
     return output_stream
 
 
 class CCD:
-    def __init__(self,tpix_horizontal,tpix_vertical,tau_weights, tau_values,runconditions='minos'):
+    def __init__(self,tpix_horizontal,tpix_vertical,tau_weights, tau_edges,runconditions='minos'):
         import numpy as np
         # self.original_image = np.copy(image_array)
         # self.exposure_images = np.zeros_like(sample_image,dtype=float)
@@ -868,7 +878,13 @@ class CCD:
         
         # Store Tau values as a 1D array corresponding to the indices
         probs = np.array(tau_weights) / np.sum(tau_weights)
-        self.trap_taus = rng.choice(tau_values, size=num_traps, p=probs)
+        
+        # 1. Select a bin for each trap
+        bin_indices = rng.choice(len(probs), size=num_traps, p=probs)
+        # 2. Sample continuously (log-uniform) between the edges of the selected bin
+        left_edges = tau_edges[bin_indices]
+        right_edges = tau_edges[bin_indices + 1]
+        self.trap_taus = np.exp(rng.uniform(np.log(left_edges), np.log(right_edges)))
         
         # Store trapped charge as a 1D array (much faster than 2D)
         self.trapped_charge_1d = np.zeros(num_traps, dtype=float)
@@ -1640,16 +1656,20 @@ class CCD:
         return result_reconstructed
 
 
-def run_single_trial(r, tpix, tpix_vertical, tau_weights, tau_values, runconditions='snolab'):
+def run_single_trial(r, tpix, tpix_vertical, tau_weights, tau_edges, runconditions='snolab',outdir='./'):
     """This function contains everything needed for a single trial"""
     import os
     # Guarantee a unique PRNG sequence for Numba across all forked child processes
     seed_numba(os.getpid() + (r * 10000))
     
     import pickle
-    filename = f'ccd_traps_run{r}.pkl'
+    import os
 
-    CCDTest = CCD(tpix, tpix_vertical, tau_weights, tau_values,runconditions=runconditions)
+    os.makedirs(outdir, exist_ok=True)
+
+    filename = outdir + f'ccd_traps_run{r}.pkl'
+
+    CCDTest = CCD(tpix, tpix_vertical, tau_weights, tau_edges,runconditions=runconditions)
 
     for i in range(100): 
         CCDTest.take_fake_image(0)  # 0h exposure

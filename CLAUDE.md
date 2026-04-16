@@ -1,0 +1,70 @@
+# CLAUDE.md
+
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+
+## Project overview
+
+SENSEI charge-trap analysis pipeline. Characterizes single-electron charge traps in skipper-CCDs from FITS images taken at multiple temperatures (125K–210K), fits trap energies/cross-sections, then runs Monte-Carlo CCD simulations to project the impact of traps on dark-matter-search conditions (MINOS / SNOLAB).
+
+Two largely independent pipelines share [utils.py](utils.py) / [dipole.py](dipole.py) helpers:
+
+1. **Analysis** — [run_charge_traps.py](run_charge_traps.py): reads FITS images from [proc/](proc/), detects dipoles, fits intensity-vs-delay curves per dipole to extract τ(T), then fits E/σ across temperatures. Produces the `tau_at_<T>k_hist.npz` files that seed the simulation.
+2. **Simulation** — [run_ccd_simulation.py](run_ccd_simulation.py) + [ccd_simulation.py](ccd_simulation.py): builds a `CCD` instance per worker with a sampled trap field, runs many fake exposures through a Numba-JIT readout, dumps per-run pickles into `minos_conditions/`, `snolab_conditions/`, etc.
+
+## Environment
+
+Conda env specified in [requirements.yaml](requirements.yaml) (name `sensei_charge_traps`, Python 3.14, numpy 2.4, numba 0.64, scipy, astropy, iminuit, h5py, mplhep). The prefix is hard-coded to the original author's machine — recreate with `conda env create -f requirements.yaml` and edit the prefix if needed.
+
+## Common commands
+
+```bash
+# Full analysis pipeline (skips stages whose cached outputs already exist on disk)
+python run_charge_traps.py --image_dir proc/ --image_dir_search 'proc/*.fits'
+
+# Parallel simulation (defaults: 500 trials, cpu_count-1 workers, MINOS conditions)
+python run_ccd_simulation.py --num_runs 500 --runconditions minos --out minos_conditions/
+python run_ccd_simulation.py --num_runs 500 --runconditions snolab --binning 8 \
+    --tauhistfile tau_at_135k_hist.npz --out snolab_conditions_binned/
+
+# Re-run the fit stage only (older script, uses pickle cache instead of HDF5)
+python doFits.py
+```
+
+No test suite, no linter configured. Notebooks ([charge_trap_analysis.ipynb](charge_trap_analysis.ipynb), [charge_trap_simulation.ipynb](charge_trap_simulation.ipynb), [charge_trap_figures.ipynb](charge_trap_figures.ipynb), [plotting.ipynb](plotting.ipynb)) are the primary interactive surface — the `.py` entry points are headless wrappers around the same functions.
+
+## Architecture notes
+
+### Cached-stage pattern
+Both [run_charge_traps.py](run_charge_traps.py) and the notebooks follow a `try: load cache; except FileNotFoundError: compute and save` pattern at every expensive stage. Key caches, in order of the pipeline:
+
+- `dipole_coord_list.npz` — per-quadrant dipole coordinates (output of `getDipoleList2`)
+- `mc_dist.npz` — Monte-Carlo null-hypothesis distance histograms
+- `dipole_spectra.h5` — per-dipole intensity-vs-`dtph` spectra (saved via `save_spectra_hdf5` in [utils.py](utils.py))
+- `fit_dipole_spectra_err_4.h5` — per-trap τ(T) fits plus E/σ fits (naming: `_err` = `useIntensityErr=True`, `_4` = `wellBehavedThreshold=4`)
+- `tau_at_<T>k_hist.npz` — τ distribution at temperature T, histogram + edges; this is what the simulation samples from
+
+**Deleting any cache forces recomputation of that stage and everything downstream.** HDF5 is the current format; `.pkl` variants are legacy (see [doFits.py](doFits.py)).
+
+### CCD simulation internals ([ccd_simulation.py](ccd_simulation.py))
+
+- The `CCD` class (~line 786) owns one quadrant (`nrow_quad=512`, `ncol_quad=3072`), an exposure accumulator, sparse trap indices (`self.trap_indices`), per-trap τ values sampled log-uniformly within histogram bins, and a `trapped_charge` float array.
+- `take_fake_image(exposure_time_hours)` (~line 980) injects dark current + single-e events, then calls the Numba-JIT `fast_readout_numba` (~line 726) which implements the column-by-column vertical clocking with probabilistic trap capture/release per row transit.
+- `runconditions` switches event rates in `take_fake_image`: `'minos'` vs `'snolab'` (SNOLAB assumes ~2× fewer high-energy events).
+- `process_run` (~line 1072) derives single-electron counts and applies `findBadCells` masking to produce `single_e_counts_masked*` arrays — these are what downstream plotting consumes.
+- Parallelism uses `ProcessPoolExecutor` with `itertools.repeat` to avoid copying `tau_weights`/`tau_edges` per task. Each worker re-seeds Numba's PRNG from `os.getpid() + r*10000` — do **not** remove `seed_numba(...)` in `run_single_trial` or all workers will produce identical traps.
+- `binning` in [run_ccd_simulation.py](run_ccd_simulation.py) scales `tpix`/`tpix_vertical` (not the image shape) — it models faster readout due to on-chip binning.
+
+### Dipole fitting ([dipole.py](dipole.py))
+- `findDipoles2` → histogram-threshold dipole finder over an electronized image.
+- `getDipoleSpectra2` → builds intensity(τph) curves per coordinate across all temperatures/files.
+- `fitTrapIntensity` → per-dipole τ fit (exponential) then per-trap Arrhenius-style E/logσ fit. Results tagged with `WellBehavedTrap`, `GoodEnergyFit`, `EnergyFitFailed` booleans that downstream code filters on.
+- `log_energy_cross_section(T, E, log_sigma)` is the thermal-emission model used to extrapolate τ to arbitrary T (how `tau_at_<T>k_hist.npz` files are generated).
+
+### Reference FITS header
+[run_ccd_simulation.py](run_ccd_simulation.py) reads one specific SNOLAB 135 K FITS from [snolab_image/](snolab_image/) purely to recover CCD timing (`HIERARCH DELAY_*` keys) for `pixel_time` / `pixel_time_vertical`. Missing that file is fatal — keep it around even when simulating MINOS conditions.
+
+### Large untracked outputs
+`.npz`, `.h5`, `.pkl`, `ccd_traps_run*.pkl` in `minos_conditions*/` / `snolab_conditions*/`, and simulation PDFs in `figures/` are regenerable products — don't commit them. The [paper/](paper/) directory contains a LaTeX manuscript; its build artifacts (`*.aux`, `*.log`, `*.fdb_latexmk`) are also regenerable.
+
+### Coordinate conventions
+Image arrays are `(row, col)` with row = vertical = readout direction. "Quadrant" indices 0–3 correspond to the four CCD amplifiers (UL/UR/LL/LR); `self.UL_expdep` etc. in `CCD.__init__` hold their measured dark-current rates.
