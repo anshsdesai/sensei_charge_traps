@@ -1045,16 +1045,18 @@ class CCD:
 
         
         # --- MEMORY OPTIMIZATION: Compute local masks on the fly ---
-        BIT_BASE1E, BIT_HALO, BIT_BLEED = 1, 2, 4
-        
+        BIT_BASE1E, BIT_HALO, BIT_BLEED, BIT_BASE2E = 1, 2, 4, 32
+
         b_trap = np.zeros((self.nrow_quad, self.ncol_quad), dtype=np.uint8)
         b_trap[get_cluster(img_trap, min_pixs=1, max_pixs=1, min_total_value=1, max_total_value=1)] |= BIT_BASE1E
+        b_trap[get_cluster(img_trap, min_pixs=1, max_pixs=2, min_total_value=2, max_total_value=2)] |= BIT_BASE2E
         b_trap[generate_halo_mask(img_trap, threshold=100, radius=60)] |= BIT_HALO
         b_trap[generate_column_bleed_mask(img_trap, threshold=100, direction='up')] |= BIT_BLEED
         self.trap_bitmasks.append(b_trap)
-        
+
         b_notrap = np.zeros((self.nrow_quad, self.ncol_quad), dtype=np.uint8)
         b_notrap[get_cluster(img_notrap, min_pixs=1, max_pixs=1, min_total_value=1, max_total_value=1)] |= BIT_BASE1E
+        b_notrap[get_cluster(img_notrap, min_pixs=1, max_pixs=2, min_total_value=2, max_total_value=2)] |= BIT_BASE2E
         b_notrap[generate_halo_mask(img_notrap, threshold=100, radius=60)] |= BIT_HALO
         b_notrap[generate_column_bleed_mask(img_notrap, threshold=100, direction='up')] |= BIT_BLEED
         self.notrap_bitmasks.append(b_notrap)
@@ -1079,7 +1081,7 @@ class CCD:
         
 
 
-        BIT_BASE1E, BIT_HALO, BIT_BLEED, BIT_HOTCOL, BIT_HOTPIX = 1, 2, 4, 8, 16
+        BIT_BASE1E, BIT_HALO, BIT_BLEED, BIT_HOTCOL, BIT_HOTPIX, BIT_BASE2E = 1, 2, 4, 8, 16, 32
         
         print("1. Aggregating statistics using Split-Sample (A/B)...")
 
@@ -1198,29 +1200,47 @@ class CCD:
             for subset in combinations(mask_keys, L):
                 combo_name = "+".join(subset) if subset else "None"
                 all_combos.append(subset)
-                self.stats_trap[combo_name] = {'counts': [], 'unmasked_pix': []}
-                self.stats_notrap[combo_name] = {'counts': [], 'unmasked_pix': []}
+                self.stats_trap[combo_name] = {'counts': [], '2e_counts': [], 'unmasked_pix': []}
+                self.stats_notrap[combo_name] = {'counts': [], '2e_counts': [], 'unmasked_pix': []}
                 
+        from cv2 import connectedComponents as _cc
         for i in range(n_images):
             b_trap = self.trap_bitmasks[i]
             b_notrap = self.notrap_bitmasks[i]
-            
+
+            # Pre-compute 2e cluster labels once per image; count via label-subtract in combo loop
+            fp2e_t = (b_trap & BIT_BASE2E) > 0
+            _, labels_2e_t = _cc(fp2e_t.astype(np.uint8), connectivity=8)
+            n_total_2e_t = int(labels_2e_t.max())
+
+            fp2e_nt = (b_notrap & BIT_BASE2E) > 0
+            _, labels_2e_nt = _cc(fp2e_nt.astype(np.uint8), connectivity=8)
+            n_total_2e_nt = int(labels_2e_nt.max())
+
             for subset in all_combos:
                 combo_name = "+".join(subset) if subset else "None"
                 mask_bits = sum(mask_map[name] for name in subset) if subset else 0
-                
+
                 # Trap Evaluation
                 surviving_t = ((b_trap & BIT_BASE1E) > 0) & ((b_trap & mask_bits) == 0)
                 unmasked_t = (b_trap & mask_bits) == 0
-                
+
+                bad_labels_t = np.unique(labels_2e_t[fp2e_t & ((b_trap & mask_bits) > 0)])
+                n_bad_2e_t = int(np.count_nonzero(bad_labels_t > 0))
+
                 self.stats_trap[combo_name]['counts'].append(np.count_nonzero(surviving_t))
+                self.stats_trap[combo_name]['2e_counts'].append(n_total_2e_t - n_bad_2e_t)
                 self.stats_trap[combo_name]['unmasked_pix'].append(np.count_nonzero(unmasked_t))
 
                 # No-Trap Evaluation
                 surviving_nt = ((b_notrap & BIT_BASE1E) > 0) & ((b_notrap & mask_bits) == 0)
                 unmasked_nt = (b_notrap & mask_bits) == 0
-                
+
+                bad_labels_nt = np.unique(labels_2e_nt[fp2e_nt & ((b_notrap & mask_bits) > 0)])
+                n_bad_2e_nt = int(np.count_nonzero(bad_labels_nt > 0))
+
                 self.stats_notrap[combo_name]['counts'].append(np.count_nonzero(surviving_nt))
+                self.stats_notrap[combo_name]['2e_counts'].append(n_total_2e_nt - n_bad_2e_nt)
                 self.stats_notrap[combo_name]['unmasked_pix'].append(np.count_nonzero(unmasked_nt))
 
         print("--- Post-Run Analysis Complete ---")
@@ -1662,22 +1682,22 @@ def run_single_trial(r, tpix, tpix_vertical, tau_weights, tau_edges, runconditio
     # Guarantee a unique PRNG sequence for Numba across all forked child processes
     seed_numba(os.getpid() + (r * 10000))
     
-    import pickle
+    import h5py
     import os
 
     os.makedirs(outdir, exist_ok=True)
 
-    filename = outdir + f'ccd_traps_run{r}.pkl'
+    filename = outdir + f'ccd_traps_run{r}.h5'
 
-    CCDTest = CCD(tpix, tpix_vertical, tau_weights, tau_edges,runconditions=runconditions)
+    CCDTest = CCD(tpix, tpix_vertical, tau_weights, tau_edges, runconditions=runconditions)
 
-    for i in range(100): 
+    for i in range(100):
         CCDTest.take_fake_image(0)  # 0h exposure
         CCDTest.take_fake_image(4)  # 4h exposure
         CCDTest.take_fake_image(6)  # 6h exposure
         CCDTest.take_fake_image(10) # 10h exposure
         CCDTest.take_fake_image(20) # 20h exposure
-        
+
     CCDTest.process_run()
 
     # Memory Cleanup
@@ -1685,9 +1705,21 @@ def run_single_trial(r, tpix, tpix_vertical, tau_weights, tau_edges, runconditio
     CCDTest.no_trap_images = []
     CCDTest.trap_bitmasks = []
     CCDTest.notrap_bitmasks = []
-    CCDTest.ccd_state = [] 
+    CCDTest.ccd_state = []
 
-    with open(filename, 'wb') as f:
-        pickle.dump(CCDTest, f)
-        
+    with h5py.File(filename, 'w') as f:
+        f.create_dataset('exposures',         data=np.array(CCDTest.exposures))
+        f.create_dataset('trap_taus',         data=CCDTest.trap_taus)
+        f.create_dataset('trap_indices_rows', data=CCDTest.trap_indices[0].astype(np.int32))
+        f.create_dataset('trap_indices_cols', data=CCDTest.trap_indices[1].astype(np.int32))
+        f.create_dataset('tau_weights',       data=np.array(tau_weights))
+        f.create_dataset('tau_edges',         data=np.array(tau_edges))
+        for group_name, stats in [('stats_trap', CCDTest.stats_trap), ('stats_notrap', CCDTest.stats_notrap)]:
+            grp = f.create_group(group_name)
+            for combo_name, d in stats.items():
+                cg = grp.create_group(combo_name)
+                cg.create_dataset('counts',      data=np.array(d['counts'],      dtype=np.int32))
+                cg.create_dataset('2e_counts',   data=np.array(d['2e_counts'],   dtype=np.int32))
+                cg.create_dataset('unmasked_pix',data=np.array(d['unmasked_pix'],dtype=np.int32))
+
     return r

@@ -5,7 +5,6 @@ from astropy.io import fits
 # from utils import *
 from ccd_simulation import *
 from tqdm.autonotebook import tqdm
-import pickle
 import multiprocessing
 from concurrent.futures import ProcessPoolExecutor
 from tqdm.autonotebook import tqdm
