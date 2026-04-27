@@ -543,21 +543,20 @@ def fitTrapIntensity(full_dipole_dict,useIntensityErr=True,wellBehavedThreshold=
                 # if np.nanmean(rel_erros) > 0.5:
                 #     dipole_dict[dp][temp]['GoodIntensityFit'] = False
 
-                dipole_dict[dp][temp]['IntensityFitInfo'] = {}
-                dipole_dict[dp][temp]['IntensityFitInfo']['p_value'] = p_value
-                dipole_dict[dp][temp]['IntensityFitInfo']['chi_squared'] = chi_squared
-                dipole_dict[dp][temp]['IntensityFitInfo']['reduced_chi_squared'] = reduced_chi_squared
+                dipole_dict[dp][temp]['fit_p_value'] = p_value
+                dipole_dict[dp][temp]['fit_chi_squared'] = chi_squared
+                dipole_dict[dp][temp]['fit_reduced_chi_squared'] = reduced_chi_squared
 
-                dipole_dict[dp][temp]['IntensityFitInfo']['r_squared'] = r2
-                dipole_dict[dp][temp]['IntensityFitInfo']['lin_r_squared'] = lin_r2
-                dipole_dict[dp][temp]['IntensityFitInfo']['const_lin_r_squared'] = const_lin_r2
+                dipole_dict[dp][temp]['fit_r_squared'] = r2
+                dipole_dict[dp][temp]['fit_lin_r_squared'] = lin_r2
+                dipole_dict[dp][temp]['fit_const_lin_r_squared'] = const_lin_r2
 
-                dipole_dict[dp][temp]['IntensityFitInfo']['fit_coeff'] = popt[0]
-                dipole_dict[dp][temp]['IntensityFitInfo']['fit_tau'] = popt[1]
+                dipole_dict[dp][temp]['fit_coeff'] = popt[0]
+                dipole_dict[dp][temp]['fit_tau'] = popt[1]
                 
-                dipole_dict[dp][temp]['IntensityFitInfo']['fit_coeff_err'] = perr[0]
-                dipole_dict[dp][temp]['IntensityFitInfo']['fit_tau_err'] = perr[1]
-                dipole_dict[dp][temp]['IntensityFitInfo']['covariance_matrix'] = pcov
+                dipole_dict[dp][temp]['fit_coeff_err'] = perr[0]
+                dipole_dict[dp][temp]['fit_tau_err'] = perr[1]
+                dipole_dict[dp][temp]['fit_covariance_matrix'] = pcov
 
                 if dipole_dict[dp][temp]['GoodIntensityFit']:
                     good_temperatures.append(temp)
@@ -619,21 +618,20 @@ def fitTrapIntensity(full_dipole_dict,useIntensityErr=True,wellBehavedThreshold=
 
                 dipole_dict[dp]['GoodEnergyFit'] = True if goodness_of_fit else False
                 # if dipole_dict[dp]['GoodEnergyFit']:
-                dipole_dict[dp]['EnergyFitInfo'] = {}
-                dipole_dict[dp]['EnergyFitInfo']['BestFitEnergy'] = popt[0]
-                dipole_dict[dp]['EnergyFitInfo']['BestFitEnergyErr'] = perr[0]
-                dipole_dict[dp]['EnergyFitInfo']['r_squared'] = r2
+                dipole_dict[dp]['energy_BestFitEnergy'] = popt[0]
+                dipole_dict[dp]['energy_BestFitEnergyErr'] = perr[0]
+                dipole_dict[dp]['energy_r_squared'] = r2
 
-                dipole_dict[dp]['EnergyFitInfo']['chi2'] = chi_squared
-                dipole_dict[dp]['EnergyFitInfo']['reduced_chi2'] = reduced_chi_squared
-                dipole_dict[dp]['EnergyFitInfo']['p_value'] = p_value
+                dipole_dict[dp]['energy_chi2'] = chi_squared
+                dipole_dict[dp]['energy_reduced_chi2'] = reduced_chi_squared
+                dipole_dict[dp]['energy_p_value'] = p_value
 
-                dipole_dict[dp]['EnergyFitInfo']['BestFitCrossSection'] = np.exp(popt[1])
-                dipole_dict[dp]['EnergyFitInfo']['BestFitCrossSectionErr'] = perr[1] * np.exp(popt[1])
-                dipole_dict[dp]['EnergyFitInfo']['CovarianceMatrix'] = pcov
-                dipole_dict[dp]['EnergyFitInfo']['temperatures'] = good_temperatures
-                dipole_dict[dp]['EnergyFitInfo']['taus'] = good_taus
-                dipole_dict[dp]['EnergyFitInfo']['tau_errs'] = good_tau_errs
+                dipole_dict[dp]['energy_BestFitCrossSection'] = np.exp(popt[1])
+                dipole_dict[dp]['energy_BestFitCrossSectionErr'] = perr[1] * np.exp(popt[1])
+                dipole_dict[dp]['energy_CovarianceMatrix'] = pcov
+                dipole_dict[dp]['energy_temperatures'] = good_temperatures
+                dipole_dict[dp]['energy_taus'] = good_taus
+                dipole_dict[dp]['energy_tau_errs'] = good_tau_errs
 
 
     return full_dipole_dict
@@ -727,19 +725,17 @@ def fitTrapIntensity_cutflow(full_dipole_dict, useIntensityErr=True, wellBehaved
                         rejection_summary[reason] += 1
                     continue
 
-                dipole_dict[dp][temp]['IntensityFitInfo'] = {
-                    'p_value': p_value,
-                    'chi_squared': chi_squared,
-                    'reduced_chi_squared': reduced_chi_squared,
-                    'r_squared': r2,
-                    'lin_r_squared': lin_r2,
-                    'const_lin_r_squared': const_lin_r2,
-                    'fit_coeff': popt[0],
-                    'fit_tau': popt[1],
-                    'fit_coeff_err': perr[0],
-                    'fit_tau_err': perr[1],
-                    'covariance_matrix': pcov
-                }
+                dipole_dict[dp][temp]['fit_p_value'] = p_value
+                dipole_dict[dp][temp]['fit_chi_squared'] = chi_squared
+                dipole_dict[dp][temp]['fit_reduced_chi_squared'] = reduced_chi_squared
+                dipole_dict[dp][temp]['fit_r_squared'] = r2
+                dipole_dict[dp][temp]['fit_lin_r_squared'] = lin_r2
+                dipole_dict[dp][temp]['fit_const_lin_r_squared'] = const_lin_r2
+                dipole_dict[dp][temp]['fit_coeff'] = popt[0]
+                dipole_dict[dp][temp]['fit_tau'] = popt[1]
+                dipole_dict[dp][temp]['fit_coeff_err'] = perr[0]
+                dipole_dict[dp][temp]['fit_tau_err'] = perr[1]
+                dipole_dict[dp][temp]['fit_covariance_matrix'] = pcov
 
                 if dipole_dict[dp][temp]['GoodIntensityFit']:
                     good_temperatures.append(temp)
@@ -789,20 +785,18 @@ def fitTrapIntensity_cutflow(full_dipole_dict, useIntensityErr=True, wellBehaved
 
                 dipole_dict[dp]['GoodEnergyFit'] = True if goodness_of_fit else False
 
-                dipole_dict[dp]['EnergyFitInfo'] = {
-                    'BestFitEnergy': popt[0],
-                    'BestFitEnergyErr': perr[0],
-                    'r_squared': r2,
-                    'chi2': chi_squared,
-                    'reduced_chi2': reduced_chi_squared,
-                    'p_value': p_value,
-                    'BestFitCrossSection': np.exp(popt[1]),
-                    'BestFitCrossSectionErr': perr[1] * np.exp(popt[1]),
-                    'CovarianceMatrix': pcov,
-                    'temperatures': good_temperatures,
-                    'taus': good_taus,
-                    'tau_errs': good_tau_errs
-                }
+                dipole_dict[dp]['energy_BestFitEnergy'] = popt[0]
+                dipole_dict[dp]['energy_BestFitEnergyErr'] = perr[0]
+                dipole_dict[dp]['energy_r_squared'] = r2
+                dipole_dict[dp]['energy_chi2'] = chi_squared
+                dipole_dict[dp]['energy_reduced_chi2'] = reduced_chi_squared
+                dipole_dict[dp]['energy_p_value'] = p_value
+                dipole_dict[dp]['energy_BestFitCrossSection'] = np.exp(popt[1])
+                dipole_dict[dp]['energy_BestFitCrossSectionErr'] = perr[1] * np.exp(popt[1])
+                dipole_dict[dp]['energy_CovarianceMatrix'] = pcov
+                dipole_dict[dp]['energy_temperatures'] = good_temperatures
+                dipole_dict[dp]['energy_taus'] = good_taus
+                dipole_dict[dp]['energy_tau_errs'] = good_tau_errs
 
     # Print the rejection summary at the end
     print("\nRejection Summary:")
@@ -841,7 +835,7 @@ def plotRandomDipoleSpectra(fit_dipole_spectra,quads,n=10):
                         plt.errorbar(dipole['seconds'],dipole['intensities'],yerr=dipole['intensity_err'],color=cmap(norm(temp)),ls='None')
 
                         seconds = np.geomspace(np.min(dipole['seconds']),np.max(dipole['seconds']),100)
-                        fit_ints = intensity_function(seconds,dipole['IntensityFitInfo']['fit_coeff'],dipole['IntensityFitInfo']['fit_tau'])
+                        fit_ints = intensity_function(seconds,dipole['fit_coeff'],dipole['fit_tau'])
                         plt.plot(seconds,fit_ints,ls='-',color=cmap(norm(temp)))
                 sm = plt.cm.ScalarMappable(cmap=cmap)
                 sm.set_clim(vmin=125, vmax=210)
