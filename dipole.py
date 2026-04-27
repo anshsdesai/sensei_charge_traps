@@ -321,8 +321,6 @@ def getDipoleSpectra2(image_dir,goodquads,full_dipole_coord_list,absolute=True):
                     dp_dict[dp][temp]['dtphs'] = []
                     dp_dict[dp][temp]['intensity_err'] = []
                     dp_dict[dp][temp]['poisson_err'] = []
-                    dp_dict[dp][temp]['hist'] = []
-                    dp_dict[dp][temp]['bins'] = []
                     dp_dict[dp][temp]['image_sigma'] = sigma_image
 
 
@@ -367,8 +365,6 @@ def getDipoleSpectra2(image_dir,goodquads,full_dipole_coord_list,absolute=True):
                 dp_dict[dp][temp]['intensities'].append(intensity)
                 dp_dict[dp][temp]['dtphs'].append(dtph)
                 dp_dict[dp][temp]['intensity_err'].append(sigma_hist)
-                dp_dict[dp][temp]['hist'].append(hist)
-                dp_dict[dp][temp]['bins'].append(bins)
                 dp_dict[dp][temp]['poisson_err'].append(sigma_poisson)
 
 
@@ -382,8 +378,6 @@ def getDipoleSpectra2(image_dir,goodquads,full_dipole_coord_list,absolute=True):
                 intensities = np.array(dp_dict[dp][temp]['intensities'])
                 intensity_err = np.array(dp_dict[dp][temp]['intensity_err'])
                 poisson_err =  np.array(dp_dict[dp][temp]['poisson_err'])
-                hist = np.array(dp_dict[dp][temp]['hist'])
-                bins = np.array(dp_dict[dp][temp]['bins'])
 
                 dtphs = np.array(dp_dict[dp][temp]['dtphs'])
                 seconds = dtphs / 15e6
@@ -395,9 +389,6 @@ def getDipoleSpectra2(image_dir,goodquads,full_dipole_coord_list,absolute=True):
                 intensity_err = intensity_err[np.argsort(dtphs)]
                 poisson_err = poisson_err[np.argsort(dtphs)]
 
-                hist = hist[np.argsort(dtphs)]
-                bins = bins[np.argsort(dtphs)]
-
                 dtphs = dtphs[np.argsort(dtphs)]
 
                 dp_dict[dp][temp]['intensities'] = intensities
@@ -406,10 +397,6 @@ def getDipoleSpectra2(image_dir,goodquads,full_dipole_coord_list,absolute=True):
 
                 dp_dict[dp][temp]['seconds'] = seconds
                 dp_dict[dp][temp]['dtphs'] = dtphs
-                dp_dict[dp][temp]['hist'] = hist
-
-                dp_dict[dp][temp]['bins'] = bins
-
 
 
 
