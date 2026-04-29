@@ -1,0 +1,27 @@
+Detection audit generated at: 2026-04-29T05:19:38.145655+00:00
+Image dir: proc
+Image search: proc/*.fits
+Quadrants used: [0, 1, 2, 3]
+Temperatures used: [125, 130, 135, 140, 145, 150, 155, 160, 165, 170, 175, 180, 183, 185, 187, 190, 193, 195, 197, 200, 203, 207, 210]
+
+RERUN: baseline
+balance_cut_used: 0.3
+persistence_rule_used: keep coordinate if it appears in more than one dtph image within a temperature
+total_identified_traps: 5171
+per_quadrant_trap_counts: {'0': 1324, '1': 1602, '2': 1068, '3': 1177}
+coords_seen_once_per_temp_but_multi_temp: 73
+additional_candidate_traps_from_cross_temperature_rescue: 73
+total_identified_traps_if_cross_temperature_rescue_enabled: 5244
+per_quadrant_trap_counts_if_cross_temperature_rescue_enabled: {'0': 1349, '1': 1619, '2': 1084, '3': 1192}
+artifact_paths: {'baseline_coords_npz': 'detection_audit_results\\baseline_dipole_coord_list.npz', 'cross_temp_rescue_only_npz': 'detection_audit_results\\baseline_cross_temp_rescue_only.npz', 'with_cross_temp_rescue_npz': 'detection_audit_results\\baseline_with_cross_temp_rescue.npz'}
+
+RERUN: balance_0p4
+balance_cut_used: 0.4
+persistence_rule_used: keep coordinate if it appears in more than one dtph image within a temperature
+total_identified_traps: 5376
+per_quadrant_trap_counts: {'0': 1384, '1': 1661, '2': 1115, '3': 1216}
+coords_seen_once_per_temp_but_multi_temp: 82
+additional_candidate_traps_from_cross_temperature_rescue: 82
+total_identified_traps_if_cross_temperature_rescue_enabled: 5458
+per_quadrant_trap_counts_if_cross_temperature_rescue_enabled: {'0': 1413, '1': 1681, '2': 1133, '3': 1231}
+artifact_paths: {'baseline_coords_npz': 'detection_audit_results\\balance_0p4_dipole_coord_list.npz', 'cross_temp_rescue_only_npz': 'detection_audit_results\\balance_0p4_cross_temp_rescue_only.npz', 'with_cross_temp_rescue_npz': 'detection_audit_results\\balance_0p4_with_cross_temp_rescue.npz'}
