@@ -16,3 +16,5 @@ paper/*.out
 *.npz
 *.h5
 figures/*
+*.png
+*.csv
