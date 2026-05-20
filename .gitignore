@@ -18,3 +18,4 @@ paper/*.out
 figures/*
 *.png
 *.csv
+checks
