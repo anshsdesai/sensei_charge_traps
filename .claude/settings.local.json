@@ -3,7 +3,8 @@
     "allow": [
       "Bash(where conda *)",
       "Read(//c/Users/Ansh/miniconda3/**)",
-      "Read(//c/Users/Ansh/anaconda3/Scripts/**)"
+      "Read(//c/Users/Ansh/anaconda3/Scripts/**)",
+      "Bash(MSYS_NO_PATHCONV=1 wsl *)"
     ]
   }
 }

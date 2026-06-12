@@ -141,22 +141,30 @@ def run_analysis(
             
             if testdp.get('WellBehavedTrap', False) and not testdp.get('EnergyFitFailed', True):
                 if testdp.get('GoodEnergyFit', False):
-                    testdpfit = testdp.get('EnergyFitInfo', {})
-                    cs = testdpfit.get('BestFitCrossSection')
-                    e = testdpfit.get('BestFitEnergy')
-                    
+                    # fitTrapIntensity stores these directly on the trap dict
+                    cs = testdp.get('energy_BestFitCrossSection')
+                    e = testdp.get('energy_BestFitEnergy')
+
                     if cs is not None and e is not None:
                         logtau_at_135 = log_energy_cross_section(135, e, np.log(cs))
                         tau_at_135 = np.exp(logtau_at_135)
                         tau_at_135s.append(tau_at_135)
 
     tau_at_135s = np.array(tau_at_135s)
-    bins = np.geomspace(1e-5, 1e9, 100)
+    if len(tau_at_135s) == 0:
+        raise RuntimeError("No well-behaved traps with good energy fits found - tau histogram would be empty.")
+    bins = np.geomspace(1e-7, 1e8, 100)
     hist, bin_edges = np.histogram(tau_at_135s, bins=bins)
     bin_centers = np.sqrt(bin_edges[:-1] * bin_edges[1:])
     
     np.savez('tau_at_135k_hist.npz', tau_at_135s=tau_at_135s, hist=hist, bin_edges=bin_edges, bin_centers=bin_centers)
     print("Saved tau_at_135k_hist.npz for simulation sampling.")
+
+    # 7. Per-trap (tau135, sigma) pairs for the simulation's SRH capture model.
+    # Refits from the stored per-temperature taus, so it is correct even when
+    # the fit HDF5 cache predates a constants change in log_energy_cross_section.
+    from make_trap_pairs import make_pairs
+    make_pairs(fitfile=spectra_filename, out='trap_tau135_sigma_pairs.npz')
 
     print("--- Analysis Complete ---")
 

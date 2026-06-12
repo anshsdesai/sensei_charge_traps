@@ -256,6 +256,17 @@ def findBadCells(data, nCells, already_bad=None, nHDUs=1, doChunkCut=False):
     return badX.ravel() if badX.shape[1] == 1 else list(map(tuple, badX)), goodCells, pvalList
 
 
+def hole_thermal_velocity(temperatures):
+    """v_th = sqrt(3 k_B T / m_cond) for holes in cm/s.
+
+    Constants match dipole.log_energy_cross_section (p-channel hole
+    conductivity effective mass 0.41 m_e for 100-200 K)."""
+    kb = 8.617333262e-5  # eV/K
+    me = 0.510998950e6   # eV
+    m_cond = 0.41 * me
+    return 2.99792458e10 * np.sqrt(3 * kb * temperatures / m_cond)
+
+
 def pixel_time(nsamp, delayH, delayIped, delayIsig, delaySW, delayRG, delayOG):		# Time to read 1 pixel
   return 5*int(delayH)+int(delayRG)+(int(delayIped)+int(delaySW)+int(delayIsig)+int(delayOG)+int(delayRG))*int(nsamp)
 
@@ -723,49 +734,68 @@ def seed_numba(seed_value):
     np.random.seed(seed_value)
 
 @njit
-def fast_readout_numba(image, exp_acc, tpix_vertical, trap_rows, trap_cols, trap_taus, trapped_charge):
+def fast_readout_numba(image, exp_acc, tpix_vertical, trap_rows, trap_cols, trap_taus, trap_kc, trapped_charge):
     """
     JIT-compiled C-speed readout loop using a stationary padded buffer.
     Eliminates the O(R^2 C) memory shifting bottleneck.
+
+    Trap interactions follow two-state Shockley-Read-Hall kinetics for each
+    row-transfer dwell of duration tpix_vertical: a trap captures from the
+    packet sitting above it at rate lambda_c = q * kc (q = carriers in the
+    packet, kc = sigma * v_th / V_packet) and emits at rate
+    lambda_e = 1 / tau_e. Emitted carriers can be recaptured before the next
+    transfer, so the end-of-dwell trap state is drawn from the exact
+    two-state transition probabilities (which include any number of
+    capture/emission toggles within the dwell).
     """
     rows, cols = image.shape
     n_traps = len(trap_taus)
-    p_release = 1.0 - np.exp(-tpix_vertical / trap_taus)
-    
+
     # 1. Pad image with empty rows at the top to simulate empty space shifting in
     padded_image = np.zeros((2 * rows, cols), dtype=np.float64)
     for r in range(rows):
         for c in range(cols):
             padded_image[r + rows, c] = image[r, c]
-            
+
     output_stream = np.zeros(rows * cols, dtype=np.float64)
     out_idx = 0
-    
+
     for t in range(rows):
         # 2. Readout the row that has reached the bottom
         read_row = 2 * rows - 1 - t
         for c in range(cols - 1, -1, -1):
             output_stream[out_idx] = padded_image[read_row, c]
             out_idx += 1
-            
+
         # 3. Trap interactions on the newly shifted pixels
         for i in range(n_traps):
             tr = trap_rows[i]
             tc = trap_cols[i]
-            
+
             # The pixel that just shifted into the trap's physical row 'tr'
             current_pixel_row = tr + rows - 1 - t
-            
-            # Capture
-            if padded_image[current_pixel_row, tc] >= 1.0 and trapped_charge[i] == 0.0:
-                padded_image[current_pixel_row, tc] -= 1.0
-                trapped_charge[i] += 1.0
-                
-            # Release
+            q = padded_image[current_pixel_row, tc]
+            lam_e = 1.0 / trap_taus[i]
+
             if trapped_charge[i] > 0.0:
-                if np.random.random() < p_release[i]:
+                # Occupied trap: an emitted carrier joins the q carriers in
+                # the packet above, so it is recaptured at rate (q+1)*kc
+                # until the packet shifts away.
+                lam_c = (q + 1.0) * trap_kc[i]
+                tot = lam_e + lam_c
+                p_free = (lam_e / tot) * (1.0 - np.exp(-tpix_vertical * tot))
+                if np.random.random() < p_free:
                     padded_image[current_pixel_row, tc] += 1.0
                     trapped_charge[i] -= 1.0
+            elif q >= 1.0:
+                # Empty trap under a charged packet: capture, allowing for
+                # re-emission within the same dwell.
+                lam_c = q * trap_kc[i]
+                tot = lam_e + lam_c
+                p_occ = (lam_c / tot) * (1.0 - np.exp(-tpix_vertical * tot))
+                if np.random.random() < p_occ:
+                    padded_image[current_pixel_row, tc] -= 1.0
+                    trapped_charge[i] += 1.0
                     
     # 4. Update Exposure Accumulator 
     # (Vectorized the O(R^2 * C) addition loop into O(R * C))
@@ -784,7 +814,19 @@ def fast_readout_numba(image, exp_acc, tpix_vertical, trap_rows, trap_cols, trap
 
 
 class CCD:
-    def __init__(self,tpix_horizontal,tpix_vertical,tau_weights, tau_edges,runconditions='minos'):
+    def __init__(
+        self,
+        tpix_horizontal,
+        tpix_vertical,
+        tau_weights,
+        tau_edges,
+        pair_tau135,
+        pair_sigma,
+        runconditions='minos',
+        trap_density_scale=1.0,
+        packet_volume_um3=3.0,
+        temperature_K=135.0,
+    ):
         import numpy as np
         # self.original_image = np.copy(image_array)
         # self.exposure_images = np.zeros_like(sample_image,dtype=float)
@@ -793,7 +835,7 @@ class CCD:
         self.tpix_vertical = tpix_vertical
         self.runconditions = runconditions
         if runconditions == 'snolab':
-            print("Using snolab run conditions, assuming 2x less high energy events")
+            print("Using snolab run conditions, assuming 10x fewer high energy events")
 
         # Raw images are omitted by default to save RAM but can be explicitly requested
         self.reconstructed_images = [] 
@@ -819,15 +861,15 @@ class CCD:
 
         self.LR_expdep = 8.23e-5 #e / pix / day
 
-        self.UL_expindep = 12.23e-5 #e / superpix / image
+        self.UL_expindep = 12.23e-5 #e / pix / image
 
-        self.UR_expindep = 9.94e-5 #e / superpix / image
+        self.UR_expindep = 9.94e-5 #e / pix / image
 
-        self.LL_expindep = 7.53e-5 #e / superpix / image
+        self.LL_expindep = 7.53e-5 #e / pix / image
 
-        self.LR_expindep = 6.52e-5 #e / superpix / day
+        self.LR_expindep = 6.52e-5 #e / pix / image
         self.exp_dep_rate = self.UR_expdep / (24 * 3600) #e / pix / s
-        self.exp_indep_rate = self.UR_expindep #/ 32 #e / pix / image
+        self.exp_indep_rate = self.UR_expindep #e / pix / image
 
         self.total_pix = (6144)* (1024)
 
@@ -868,7 +910,15 @@ class CCD:
         # --- OPTIMIZATION 1: SPARSE TRAP STORAGE ---
         # Instead of a full boolean mask, store the coordinates of traps
         # trap_density calculation remains the same...
-        trap_density = (5171 / 4) / (self.nrow_quad * self.ncol_quad)
+        baseline_trap_density = (5171 / 4) / (self.nrow_quad * self.ncol_quad)
+        trap_density = baseline_trap_density * trap_density_scale
+        if not 0 <= trap_density <= 1:
+            raise ValueError(
+                f"trap_density_scale={trap_density_scale} gives invalid "
+                f"per-pixel trap probability {trap_density}"
+            )
+        self.trap_density = trap_density
+        self.trap_density_scale = trap_density_scale
         rng = np.random.default_rng()
         self.trap_mask = rng.random(shape) < trap_density
         
@@ -885,7 +935,29 @@ class CCD:
         left_edges = tau_edges[bin_indices]
         right_edges = tau_edges[bin_indices + 1]
         self.trap_taus = np.exp(rng.uniform(np.log(left_edges), np.log(right_edges)))
-        
+
+        # --- SRH capture/recapture parameters ---
+        # Each trap gets a capture cross-section resampled from the measured
+        # (tau_e(135K), sigma) pairs nearest in log(tau), preserving the
+        # empirical tau-sigma correlation. The per-carrier capture rate is
+        # kc = sigma * v_th / V_packet, where V_packet is the effective
+        # volume explored by a single carrier confined in a pixel well.
+        pair_tau135 = np.asarray(pair_tau135, dtype=float)
+        pair_sigma = np.asarray(pair_sigma, dtype=float)
+        order = np.argsort(pair_tau135)
+        sorted_logtau = np.log(pair_tau135[order])
+        sorted_sigma = pair_sigma[order]
+        K = min(20, len(sorted_sigma))
+        ins = np.searchsorted(sorted_logtau, np.log(self.trap_taus))
+        lo = np.clip(ins - K // 2, 0, len(sorted_sigma) - K)
+        self.trap_sigmas = sorted_sigma[lo + rng.integers(0, K, size=num_traps)]
+
+        self.packet_volume_um3 = packet_volume_um3
+        self.temperature_K = temperature_K
+        v_th = hole_thermal_velocity(temperature_K)  # cm/s
+        packet_volume_cm3 = packet_volume_um3 * 1e-12
+        self.trap_kc = self.trap_sigmas * v_th / packet_volume_cm3  # per-carrier capture rate [1/s]
+
         # Store trapped charge as a 1D array (much faster than 2D)
         self.trapped_charge_1d = np.zeros(num_traps, dtype=float)
 
@@ -934,43 +1006,43 @@ class CCD:
     def charge_trap_interaction(self, current_image, dt):
         import numpy as np
         # --- OPTIMIZATION 2: SPARSE INTERACTION ---
-        
-        # 1. Extract charge ONLY at trap locations
-        # We use the pre-calculated indices to grab values directly
-        charge_at_traps = current_image[self.trap_indices]
-        
-        # 2. Capture Logic (Vectorized on 1D arrays)
-        # Check: Pixel has charge (>=1) AND Trap is empty (==0)
-        can_capture = (charge_at_traps >= 1.0) & (self.trapped_charge_1d == 0.0)
-        
-        # Get indices of traps that are actually capturing right now
-        # We filter our master index list by the boolean 'can_capture'
-        capturing_rows = self.trap_indices[0][can_capture]
-        capturing_cols = self.trap_indices[1][can_capture]
-        
-        # Update the image and the trap state
-        current_image[capturing_rows, capturing_cols] -= 1.0
-        self.trapped_charge_1d[can_capture] += 1.0
+        # Two-state SRH kinetics over a static dwell of duration dt (the
+        # exposure): capture at rate q*kc from the charge sitting in the
+        # trap's own pixel, emission at rate 1/tau_e, with recapture of
+        # emitted carriers. Same model as fast_readout_numba but vectorized.
+        if dt <= 0:
+            return current_image
 
-        # 3. Release Logic
-        # Calculate probability P = 1 - exp(-dt/tau)
-        # We use the scalar dt directly (no need for an array of dt)
-        p_release = 1.0 - np.exp(-dt / self.trap_taus)
-        
-        # Generate random rolls only for the traps (N=1300), not the image (N=1.5M)
+        q = current_image[self.trap_indices]
+        lam_e = 1.0 / self.trap_taus
         n_traps = len(self.trap_taus)
         random_rolls = np.random.random(n_traps)
-        
-        # Check: Trap has charge (>0) AND Roll is successful
-        should_release = (self.trapped_charge_1d > 0) & (random_rolls < p_release)
-        
-        # Get indices of traps that are releasing
+
+        occupied = self.trapped_charge_1d > 0
+
+        # Occupied traps: emitted carrier joins the q carriers in the pixel,
+        # recaptured at rate (q+1)*kc until the end of the exposure.
+        lam_c_occ = (q + 1.0) * self.trap_kc
+        tot_occ = lam_e + lam_c_occ
+        p_free = (lam_e / tot_occ) * (1.0 - np.exp(-dt * tot_occ))
+        should_release = occupied & (random_rolls < p_free)
+
+        # Empty traps under a charged pixel: capture, allowing re-emission
+        # within the exposure.
+        lam_c_emp = q * self.trap_kc
+        tot_emp = lam_e + lam_c_emp
+        p_occ = np.where(q >= 1.0, (lam_c_emp / tot_emp) * (1.0 - np.exp(-dt * tot_emp)), 0.0)
+        should_capture = (~occupied) & (random_rolls < p_occ)
+
         releasing_rows = self.trap_indices[0][should_release]
         releasing_cols = self.trap_indices[1][should_release]
-        
-        # Update image and trap state
         current_image[releasing_rows, releasing_cols] += 1.0
         self.trapped_charge_1d[should_release] -= 1.0
+
+        capturing_rows = self.trap_indices[0][should_capture]
+        capturing_cols = self.trap_indices[1][should_capture]
+        current_image[capturing_rows, capturing_cols] -= 1.0
+        self.trapped_charge_1d[should_capture] += 1.0
 
         return current_image
 
@@ -1015,7 +1087,7 @@ class CCD:
         if self.runconditions == 'minos':
             q0_blank= transplant_clusters(q0.T, target_shape=(self.nrow_quad, self.ncol_quad),count_threshold=100, max_aspect_ratio=3.0,radius=radius,exposure=exp)
         elif self.runconditions == 'snolab':
-            q0_blank= transplant_clusters(q0.T, target_shape=(self.nrow_quad, self.ncol_quad),count_threshold=100, max_aspect_ratio=3.0,radius=radius,exposure=exp/2)
+            q0_blank= transplant_clusters(q0.T, target_shape=(self.nrow_quad, self.ncol_quad),count_threshold=100, max_aspect_ratio=3.0,radius=radius,exposure=exp/10)
 
         # footprint = disk(radius)
 
@@ -1664,8 +1736,8 @@ class CCD:
         # Use the Numba JIT compiled C-loop to eliminate the python iteration bottleneck
         result_flat = fast_readout_numba(
             image, self.exposure_accumulator, self.tpix_vertical,
-            self.trap_indices[0], self.trap_indices[1], 
-            self.trap_taus, self.trapped_charge_1d
+            self.trap_indices[0], self.trap_indices[1],
+            self.trap_taus, self.trap_kc, self.trapped_charge_1d
         )
 
         result_reconstructed= result_flat.reshape(rows, cols)
@@ -1676,7 +1748,19 @@ class CCD:
         return result_reconstructed
 
 
-def run_single_trial(r, tpix, tpix_vertical, tau_weights, tau_edges, runconditions='snolab',outdir='./'):
+def run_single_trial(
+    r,
+    tpix,
+    tpix_vertical,
+    tau_weights,
+    tau_edges,
+    pair_tau135,
+    pair_sigma,
+    runconditions='snolab',
+    outdir='./',
+    trap_density_scale=1.0,
+    packet_volume_um3=3.0,
+):
     """This function contains everything needed for a single trial"""
     import os
     # Guarantee a unique PRNG sequence for Numba across all forked child processes
@@ -1688,8 +1772,20 @@ def run_single_trial(r, tpix, tpix_vertical, tau_weights, tau_edges, runconditio
     os.makedirs(outdir, exist_ok=True)
 
     filename = outdir + f'ccd_traps_run{r}.h5'
+    if os.path.exists(filename):
+        return r
 
-    CCDTest = CCD(tpix, tpix_vertical, tau_weights, tau_edges, runconditions=runconditions)
+    CCDTest = CCD(
+        tpix,
+        tpix_vertical,
+        tau_weights,
+        tau_edges,
+        pair_tau135,
+        pair_sigma,
+        runconditions=runconditions,
+        trap_density_scale=trap_density_scale,
+        packet_volume_um3=packet_volume_um3,
+    )
 
     for i in range(100):
         CCDTest.take_fake_image(0)  # 0h exposure
@@ -1710,10 +1806,15 @@ def run_single_trial(r, tpix, tpix_vertical, tau_weights, tau_edges, runconditio
     with h5py.File(filename, 'w') as f:
         f.create_dataset('exposures',         data=np.array(CCDTest.exposures))
         f.create_dataset('trap_taus',         data=CCDTest.trap_taus)
+        f.create_dataset('trap_sigmas',       data=CCDTest.trap_sigmas)
         f.create_dataset('trap_indices_rows', data=CCDTest.trap_indices[0].astype(np.int32))
         f.create_dataset('trap_indices_cols', data=CCDTest.trap_indices[1].astype(np.int32))
         f.create_dataset('tau_weights',       data=np.array(tau_weights))
         f.create_dataset('tau_edges',         data=np.array(tau_edges))
+        f.attrs['trap_density'] = CCDTest.trap_density
+        f.attrs['trap_density_scale'] = CCDTest.trap_density_scale
+        f.attrs['packet_volume_um3'] = CCDTest.packet_volume_um3
+        f.attrs['temperature_K'] = CCDTest.temperature_K
         for group_name, stats in [('stats_trap', CCDTest.stats_trap), ('stats_notrap', CCDTest.stats_notrap)]:
             grp = f.create_group(group_name)
             for combo_name, d in stats.items():

@@ -19,3 +19,9 @@ figures/*
 *.png
 *.csv
 checks
+
+# Method 3 completeness workspace generated artifacts
+trap_completeness_method3/cache/*
+!trap_completeness_method3/cache/.gitkeep
+trap_completeness_method3/notebooks/.ipynb_checkpoints/
+trap_completeness_method3/notebooks/**/*.ipynb_checkpoints/

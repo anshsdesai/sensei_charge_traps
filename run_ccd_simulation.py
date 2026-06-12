@@ -15,11 +15,23 @@ import argparse
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description="Run parallel CCD charge trap simulations.")
     parser.add_argument('--num_runs', type=int, default=500, help="Number of simulation trials to run.")
-    parser.add_argument('--num_workers', type=int, default=None, help="Number of CPU workers (defaults to max cores - 1).")
+    parser.add_argument('--num_workers', type=int, default=None, help="Number of CPU workers (defaults to half the cores; each worker holds ~2.3 GB, so cores-1 can exhaust RAM).")
     parser.add_argument('--runconditions', type=str, default='minos', choices=['minos', 'snolab'], help="Run conditions configuration to use.")
     parser.add_argument('--binning', type=float, default=1.0, help="Scale factor to divide pixel readout times (simulates binning).")
     parser.add_argument('--out', type=str, default='./', help="Output directory.")
     parser.add_argument('--tauhistfile', type=str, default='tau_at_135k_hist.npz', help="the histogram file to used to sample tau values.")
+    parser.add_argument('--pairsfile', type=str, default='trap_tau135_sigma_pairs.npz',
+                        help="Per-trap (tau135, sigma) pairs file (from make_trap_pairs.py) used to assign capture cross-sections.")
+    parser.add_argument('--packet-volume-um3', type=float, default=3.0,
+                        help="Effective volume (um^3) explored by a single carrier in a pixel well; sets the capture rate kc = sigma*v_th/V. "
+                             "Default 3 um^3: collecting-phase area (~12x5-10 um^2) x thermal vertical spread in the buried channel (~0.02-0.07 um). "
+                             "Vary by ~a decade each way as a systematic.")
+    parser.add_argument(
+        '--trap-density-scale',
+        type=float,
+        default=1.0,
+        help="Multiplier applied to the baseline density of 5171 traps per full CCD.",
+    )
     args = parser.parse_args()
 
     snolab_dir = './snolab_image/'
@@ -59,26 +71,46 @@ if __name__ == '__main__':
         print(f"Error: {fname} not found. Please run run_charge_traps.py first to generate this file.")
         sys.exit(1)
 
+    # Load measured (tau135, sigma) pairs for the SRH capture/recapture model
+    try:
+        pair_data = np.load(args.pairsfile)
+        pair_tau135 = pair_data['tau135']
+        pair_sigma = pair_data['sigma']
+        print(f"Loaded {args.pairsfile} ({len(pair_tau135)} trap pairs).")
+    except FileNotFoundError:
+        print(f"Error: {args.pairsfile} not found. Please run make_trap_pairs.py first to generate this file.")
+        sys.exit(1)
+
     num_runs = args.num_runs
-    num_workers = args.num_workers if args.num_workers is not None else max(1, multiprocessing.cpu_count() - 1)
+    # Each worker holds its own CCD instance (~2.3 GB private memory), so the
+    # default uses half the cores rather than cores-1 to stay within RAM.
+    num_workers = args.num_workers if args.num_workers is not None else max(1, multiprocessing.cpu_count() // 2)
     
     print(f"Starting parallel execution with {num_workers} CPU cores for {num_runs} runs...")
-    print(f"Conditions: {args.runconditions}, tpix: {tpix:.3e} s, tpix_vertical: {tpix_vertical:.3e} s")
+    print(
+        f"Conditions: {args.runconditions}, trap density scale: {args.trap_density_scale:g}, "
+        f"packet volume: {args.packet_volume_um3:g} um^3, "
+        f"tpix: {tpix:.3e} s, tpix_vertical: {tpix_vertical:.3e} s"
+    )
 
     with ProcessPoolExecutor(max_workers=num_workers) as executor:
         # executor.map can take multiple iterables. It stops when the shortest one (range) runs out.
         # itertools.repeat() efficiently yields the exact same memory reference over and over.
         results = list(tqdm(
             executor.map(
-                run_single_trial, 
+                run_single_trial,
                 range(num_runs),                     # r (changes 0 to num_runs-1)
                 itertools.repeat(tpix),              # tpix (constant)
                 itertools.repeat(tpix_vertical),     # tpix_vertical (constant)
                 itertools.repeat(tau_weights),       # tau_weights (constant)
                 itertools.repeat(tau_edges),         # tau_edges (constant)
+                itertools.repeat(pair_tau135),       # measured tau135 pairs (constant)
+                itertools.repeat(pair_sigma),        # measured sigma pairs (constant)
                 itertools.repeat(args.runconditions), # run conditions (string constant)
-                itertools.repeat(args.out) # run conditions (string constant)
-            ), 
-            total=num_runs, 
+                itertools.repeat(args.out),          # output directory (constant)
+                itertools.repeat(args.trap_density_scale), # trap density multiplier (constant)
+                itertools.repeat(args.packet_volume_um3),  # single-carrier packet volume (constant)
+            ),
+            total=num_runs,
             desc="Running Trials"
         ))

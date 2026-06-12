@@ -413,12 +413,26 @@ def intensity_function(tph,coeff,tau):
     return npumps*coeff*(np.exp(-tph / tau) - np.exp(-8 * (tph/tau)))
 
 
+#hole effective masses (in units of the electron rest mass) for p-channel
+#silicon between 100 and 200 K (Green 1990), as in arXiv:2406.18502
+M_COND_HOLE = 0.41
+M_DENS_HOLE = 0.94
+
+def hole_thermal_velocity(temperatures):
+    """v_th = sqrt(3 k_B T / m_cond) for holes, in cm/s."""
+    kb = 8.617333262e-5 #eV/K
+    me = 0.510998950e6 #eV
+    ccms = 2.99792458e10 #cm/s
+    return ccms * np.sqrt(3 * kb * temperatures / (M_COND_HOLE * me))
+
 def log_energy_cross_section(temperatures,E,logsigma):
-    kb = 8.6717333262e-5 #eV/K
-    h = 4.1135e-15 #eV/s
-    me = 0.511e6 #eV
-    ccms = 3e10
-    denom = 2*(me* np.sqrt(3) * (2 * np.pi)**(3/2))
+    #SRH emission time tau_e = exp(E/kT) / (sigma v_th N_v) with
+    #v_th = sqrt(3 kT / m_cond) and N_v = 2 (2 pi m_dens kT / h^2)^(3/2)
+    kb = 8.617333262e-5 #eV/K
+    h = 4.135667696e-15 #eV s
+    me = 0.510998950e6 #eV
+    ccms = 2.99792458e10 #cm/s
+    denom = 2 * np.sqrt(3) * (2 * np.pi)**(3/2) * (M_DENS_HOLE * me)**(3/2) / np.sqrt(M_COND_HOLE * me)
     kbT = kb * temperatures
     scaling_factor =  (h**3) * (ccms**2) / denom
     logtaus = np.log(scaling_factor) - logsigma - 2 * np.log(kbT) + (E  / kbT)
