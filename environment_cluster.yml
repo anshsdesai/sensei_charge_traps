@@ -1,0 +1,25 @@
+# Cross-platform conda env for running the CCD trap SIMULATION campaigns on a
+# Linux server. This is intentionally NOT requirements.yaml: that file is a
+# fully Windows-pinned conda export (pywin32, vc14_runtime, *haa95532* builds)
+# and will not solve on Linux.
+#
+# Adds `opencv`, which the masking step (ccd_simulation.process_run ->
+# cv2.connectedComponents) requires and the Windows export omitted.
+#
+#   conda env create -f environment_cluster.yml
+#   conda activate sensei_charge_traps
+name: sensei_charge_traps
+channels:
+  - conda-forge
+dependencies:
+  - python=3.14
+  - numpy=2.4
+  - numba=0.64
+  - scipy
+  - astropy=7.2
+  - h5py
+  - scikit-image=0.26
+  - opencv
+  - matplotlib-base
+  - tqdm
+  - pip
