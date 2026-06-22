@@ -16,6 +16,12 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description="Run parallel CCD charge trap simulations.")
     parser.add_argument('--num_runs', type=int, default=200, help="Number of simulation trials to run.")
     parser.add_argument('--num_workers', type=int, default=None, help="Number of CPU workers (defaults to half the cores; each worker holds ~2.3 GB, so cores-1 can exhaust RAM).")
+    parser.add_argument('--run-offset', type=int, default=0,
+                        help="Starting trial index (default 0). Trials run for r in "
+                             "[run_offset, run_offset+num_runs); each writes "
+                             "ccd_traps_run{r}.h5 and seeds the PRNG from r, so disjoint "
+                             "offsets produce disjoint, non-colliding trials. Used to split "
+                             "one scenario's trials across many short HTCondor jobs.")
     parser.add_argument('--runconditions', type=str, default='minos', choices=['minos', 'snolab'], help="Run conditions configuration to use.")
     parser.add_argument('--binning', type=float, default=1.0, help="Scale factor to divide pixel readout times (simulates binning).")
     parser.add_argument('--out', type=str, default='./', help="Output directory.")
@@ -162,7 +168,7 @@ if __name__ == '__main__':
         results = list(tqdm(
             executor.map(
                 run_single_trial,
-                range(num_runs),                     # r (changes 0 to num_runs-1)
+                range(args.run_offset, args.run_offset + num_runs),  # r (run_offset .. run_offset+num_runs-1)
                 itertools.repeat(tpix),              # tpix (constant)
                 itertools.repeat(tpix_vertical),     # tpix_vertical (constant)
                 itertools.repeat(tau_weights),       # tau_weights (constant)

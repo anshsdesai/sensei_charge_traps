@@ -178,6 +178,12 @@ def main():
                              "masked excess (run-to-run CV ~8%%); raise for tighter "
                              "headline numbers.")
     parser.add_argument('--num_workers', type=int, default=None)
+    parser.add_argument('--run-offset', type=int, default=None,
+                        help="Forwarded to run_ccd_simulation as --run-offset, to run a "
+                             "trial sub-range [offset, offset+num_runs). When set (even to 0) "
+                             "the campaign-level 'already complete' skip is disabled and "
+                             "per-file idempotency in run_ccd_simulation handles resume, so "
+                             "each HTCondor job can own a disjoint chunk of a scenario's trials.")
     parser.add_argument('--skip_upper', action='store_true',help='If set will skip the upper limit scenario.')
     parser.add_argument('--out_base', type=str, default='campaign')
     parser.add_argument('--only', type=str, default=None,
@@ -244,6 +250,11 @@ def main():
     args = parser.parse_args()
     upper = not args.skip_upper
     vp_values = VP_ORDER if args.vp_scan else (VP_BASELINE,)
+    # Chunked (HTCondor) mode: --run-offset given (even 0). Each job owns a
+    # disjoint trial range; the campaign-level completeness skip is disabled and
+    # run_ccd_simulation's per-file skip provides idempotent resume.
+    chunked = args.run_offset is not None
+    run_offset = args.run_offset if chunked else 0
 
     hist_suffix = FLAVOR_HIST_SUFFIX[args.flavor]
     baseline_hist = f'tau_at_135k_hist{hist_suffix}.npz'
@@ -322,12 +333,13 @@ def main():
             if len(incompatible) > 5:
                 print(f"    ... and {len(incompatible) - 5} more")
             sys.exit(1)
-        if n_done >= args.num_runs:
+        if not chunked and n_done >= args.num_runs:
             print(f"\n=== {label}: already complete, skipping ===")
             continue
         cmd = [
             sys.executable, 'run_ccd_simulation.py',
             '--num_runs', str(args.num_runs),
+            '--run-offset', str(run_offset),
             '--runconditions', cond,
             '--tauhistfile', histfile,
             '--pairsfile', pairs_file,
