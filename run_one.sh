@@ -4,10 +4,14 @@
 # Invoked (via campaign.sub) as:
 #   bash run_one.sh <label> <exp_indep_charge_mode> <run_offset> <num_runs>
 #
-# Cluster-specific paths — edit REPO / the conda.sh path if you relocate.
-set -euo pipefail
+# Cluster-specific paths — edit HOME / REPO if you relocate.
+# NOTE: Condor runs jobs in a minimal environment with no $HOME, so we set it
+# explicitly (conda needs it). We use `set -e` but NOT `set -u`: conda's own
+# activation scripts reference variables that can be unset in that sparse env.
+set -eo pipefail
 
-REPO=/export/home/adesai/Projects/sensei_charge_traps
+export HOME=/export/home/adesai
+REPO="$HOME/Projects/sensei_charge_traps"
 
 source "$HOME/miniforge3/etc/profile.d/conda.sh"
 conda activate sensei_charge_traps
