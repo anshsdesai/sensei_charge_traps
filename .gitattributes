@@ -1,0 +1,5 @@
+# Force LF for shell scripts and Condor submit files so they are never mangled
+# by core.autocrlf=true on Windows checkouts (CRLF in a script breaks both the
+# kernel shebang exec and `conda activate` at runtime on Linux).
+*.sh   text eol=lf
+*.sub  text eol=lf

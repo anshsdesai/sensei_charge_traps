@@ -1,0 +1,23 @@
+# HTCondor submit for the chunked CCD trap-simulation campaign.
+# One job per (scenario label, charge mode, trial offset); each runs a short
+# chunk of trials on a single 1-core slot. Generate joblist.txt with
+# `bash make_joblist.sh` first, then `condor_submit campaign.sub`.
+#
+# Run through /bin/bash (not the script directly) so a stray shebang/exec-format
+# issue can never block scheduling; run_one.sh is found on the shared NFS home.
+universe              = vanilla
+executable            = /bin/bash
+transfer_executable   = false
+should_transfer_files = NO
+initialdir            = /export/home/adesai/Projects/sensei_charge_traps
+arguments             = "run_one.sh $(label) $(mode) $(offset) $(chunk)"
+
+output                = condor_logs/$(mode)_$(label)_$(offset).out
+error                 = condor_logs/$(mode)_$(label)_$(offset).err
+log                   = condor_logs/campaign.log
+
+request_cpus          = 1
+request_memory        = 3000
+request_disk          = 100000
+
+queue label, mode, offset, chunk from joblist.txt
