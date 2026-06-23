@@ -6,6 +6,9 @@
 # matches the real scenario enumeration (no hand-maintained list to drift).
 #
 # Override defaults via env, e.g.:  TOTAL=100 CHUNK=5 bash make_joblist.sh
+# Set VP_SCAN=1 to also queue the V_p systematic band (vp1, vp10) — adds 48
+# scenarios (24 per mode). run_one.sh always passes --vp-scan, so these jobs
+# run correctly. Default (unset) queues only the central V_p=3 headline set.
 set -euo pipefail
 
 REPO=/export/home/adesai/Projects/sensei_charge_traps
@@ -16,10 +19,12 @@ CHUNK=${CHUNK:-10}                        # trials per Condor job (~CHUNK*6 min)
 MODES=${MODES:-"pre_readout post_readout"}
 FLAVOR=${FLAVOR:-minimal_caldet}
 BINNING=${BINNING:-32}
+VP_SCAN_FLAG=""
+[ -n "${VP_SCAN:-}" ] && VP_SCAN_FLAG="--vp-scan"
 
 : > joblist.txt
 for mode in $MODES; do
-  python run_campaign.py --flavor "$FLAVOR" --binning-factors "$BINNING" \
+  python run_campaign.py --flavor "$FLAVOR" --binning-factors "$BINNING" $VP_SCAN_FLAG \
       --exp-indep-charge-mode "$mode" --list \
     | awk '/^(minos|snolab)_/{print $1}' \
     | while read -r label; do
@@ -31,4 +36,4 @@ for mode in $MODES; do
       done
 done
 
-echo "Wrote $(wc -l < joblist.txt) jobs to joblist.txt (TOTAL=$TOTAL, CHUNK=$CHUNK, modes: $MODES)."
+echo "Wrote $(wc -l < joblist.txt) jobs to joblist.txt (TOTAL=$TOTAL, CHUNK=$CHUNK, modes: $MODES, vp_scan: ${VP_SCAN:-off})."
