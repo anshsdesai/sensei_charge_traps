@@ -45,7 +45,7 @@ VP_BASELINE = 3.0
 VP_ORDER = (VP_BASELINE, 1.0, 10.0)
 # Readout binning factor for unbinned data (the default everywhere). Binned
 # variants are opt-in via --binning-factors and only emitted at the central V_p
-# sequencer clear (see binnings_for).
+# sequencer and three_hour clears (see binnings_for).
 BINNING_BASELINE = 1.0
 # Both clear strategies are run for every scenario: the standard ~3.26 s
 # sequencer clear and the 3-hour continuous clear ('three_hour').
@@ -116,17 +116,17 @@ def exposure_orders_for(vp, policy):
 def binnings_for(clear_mode, vp, exposure_order, factors):
     """Readout-binning factors to run for a given clear mode / V_p / exposure
     order. Always runs unbinned (factor 1.0); binned variants from
-    --binning-factors are added only for the standard sequencer clear at the
-    central V_p in the science-default 'shuffled' order -- the configuration the
-    real binned (32x1 superpixel) data was taken in, and the one where the trap
-    effect has the statistics to resolve a binning shift. (The legacy 'ordered'
-    cycle is a diagnostic, so it is left unbinned to avoid doubling the expensive
-    binned runs.) Binning only divides the per-row readout dwell
+    --binning-factors are added only for the sequencer and three_hour clears at
+    the central V_p in the science-default 'shuffled' order -- the configurations
+    the real binned (32x1 superpixel) data was taken in, and the ones where the
+    trap effect has the statistics to resolve a binning shift. (The legacy
+    'ordered' cycle is a diagnostic, so it is left unbinned to avoid doubling the
+    expensive binned runs.) Binning only divides the per-row readout dwell
     (tpix/tpix_vertical); under the phase-limited V1/V3 transport model this
     shortens the emission window while leaving the fixed V1/V3 capture window
     (phase_capture_ticks) unchanged."""
     out = [BINNING_BASELINE]
-    if clear_mode == 'sequencer' and vp == VP_BASELINE and exposure_order == 'shuffled':
+    if clear_mode in ('sequencer', 'three_hour') and vp == VP_BASELINE and exposure_order == 'shuffled':
         out += [f for f in factors if f != BINNING_BASELINE]
     return out
 
