@@ -260,21 +260,22 @@ def main():
     baseline_hist = f'tau_at_135k_hist{hist_suffix}.npz'
 
     # Baseline trap population = the characterized-trap count for this flavor,
-    # i.e. the integral of the baseline tau histogram (matches what
-    # run_ccd_simulation now seeds from). It is the divisor that converts the
-    # upper-limit histogram sum into a density scale, so the upper-limit run
-    # places exactly hist_upper.sum() traps. (Characterized, not detected:
-    # characterization rejects ~97-99% of decoys; detection does not.)
+    # i.e. the integral of the baseline tau histogram (this is what
+    # run_ccd_simulation seeds n_detected_traps from). (Characterized, not
+    # detected: characterization rejects ~97-99% of decoys; detection does not.)
     n_baseline_traps = int(round(float(np.load(baseline_hist)['hist'].sum())))
     print(f"Baseline trap count ({args.flavor}): {n_baseline_traps} characterized "
           f"traps from {baseline_hist}.")
 
     if upper:
         upper_hist = f'tau_at_135k_hist{hist_suffix}_upper_limit.npz'
-        if args.upper_density_scale is None:
-            upper_scale = float(np.load(upper_hist)['hist'].sum()) / n_baseline_traps
-        else:
-            upper_scale = args.upper_density_scale
+        # The upper histogram's integral IS the upper-limit trap count, and the
+        # worker seeds n_detected_traps from the histfile integral (it places
+        # n_detected_traps * trap_density_scale traps). So the density scale must
+        # be 1.0 -- multiplying by sum(upper)/baseline here double-counts and
+        # placed ~4.6x too many traps. --upper-density-scale stays as a manual
+        # systematic override only.
+        upper_scale = 1.0 if args.upper_density_scale is None else args.upper_density_scale
     # The (tau135, sigma) pairs are refit from the same per-trap selection as the
     # histogram, so they must track the flavor too; otherwise the sim mixes (e.g.)
     # the minimal tau histogram with the legacy cross-section pairs.
