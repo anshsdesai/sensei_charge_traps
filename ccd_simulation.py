@@ -943,6 +943,7 @@ class CCD:
         binning_0h_factor=32.0,
         binning=1.0,
         n_detected_traps=DEFAULT_N_DETECTED_TRAPS,
+        zero_exp_dep_rate=False,
     ):
         import numpy as np
         # self.original_image = np.copy(image_array)
@@ -1069,6 +1070,13 @@ class CCD:
 
         self.LR_expindep = 6.52e-5 #e / pix / image
         self.exp_dep_rate = self.UR_expdep / (24 * 3600) #e / pix / s
+        # Trap-only hypothesis test: zero the injected single-electron dark
+        # current so trap emission is the sole exposure-dependent single-e
+        # source. High-energy cosmic events and exposure-independent spurious
+        # charge are untouched.
+        self.zero_exp_dep_rate = bool(zero_exp_dep_rate)
+        if self.zero_exp_dep_rate:
+            self.exp_dep_rate = 0.0
         self.exp_indep_rate = self.UR_expindep #e / pix / image
 
         self.total_pix = (6144)* (1024)
@@ -2057,6 +2065,7 @@ def run_single_trial(
     tauhistfile='',
     pairsfile='',
     binning=1.0,
+    zero_exp_dep_rate=False,
 ):
     """This function contains everything needed for a single trial"""
     import os
@@ -2172,6 +2181,7 @@ def run_single_trial(
         binning_0h_factor=binning_0h_factor,
         binning=binning,
         n_detected_traps=n_detected_traps,
+        zero_exp_dep_rate=zero_exp_dep_rate,
     )
 
     # Order of the full image sequence. With the fixed 0->4->6->10->20 ordering
@@ -2248,6 +2258,8 @@ def run_single_trial(
         f.attrs['trap_density'] = CCDTest.trap_density
         f.attrs['trap_density_scale'] = CCDTest.trap_density_scale
         f.attrs['n_detected_traps'] = CCDTest.n_detected_traps
+        f.attrs['exp_dep_rate'] = CCDTest.exp_dep_rate
+        f.attrs['zero_exp_dep_rate'] = CCDTest.zero_exp_dep_rate
         f.attrs['packet_volume_um3'] = CCDTest.packet_volume_um3
         f.attrs['trap_transport_model'] = CCDTest.trap_transport_model
         f.attrs['phase_capture_ticks'] = CCDTest.phase_capture_ticks

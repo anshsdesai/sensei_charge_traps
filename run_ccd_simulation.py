@@ -81,6 +81,14 @@ if __name__ == '__main__':
              "'ordered' uses the old fixed 0->4->6->10->20 cycle (in binned_0h "
              "mode, the fixed 4->6->10->20 real-exposure cycle).",
     )
+    parser.add_argument(
+        '--zero-exp-dep-rate',
+        action='store_true',
+        help="Zero the injected single-electron dark current (exp_dep_rate=0) so "
+             "trap emission is the only exposure-dependent single-e source. "
+             "High-energy cosmic events and exposure-independent spurious charge "
+             "are unaffected (trap-only hypothesis test).",
+    )
     args = parser.parse_args()
 
     snolab_dir = './snolab_image/'
@@ -188,6 +196,7 @@ if __name__ == '__main__':
                 itertools.repeat(fname),                   # tau histogram file (provenance)
                 itertools.repeat(args.pairsfile),          # (tau, sigma) pairs file (provenance)
                 itertools.repeat(args.binning),            # global readout binning factor (provenance)
+                itertools.repeat(args.zero_exp_dep_rate),  # zero single-e dark current (trap-only test)
             ),
             total=num_runs,
             desc="Running Trials"
