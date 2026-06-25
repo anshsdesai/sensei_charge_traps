@@ -212,7 +212,7 @@ def main():
                              "(overrides --effcorr/--skip_upper). The trap-only "
                              "bracket campaign uses '--populations effcorr upper': "
                              "effcorr is the MLE point estimate (empty tau bins "
-                             "zeroed, lower edge) and upper fills empty bins at 90% "
+                             "zeroed, lower edge) and upper fills empty bins at 90%% "
                              "CL (upper edge).")
     parser.add_argument('--zero-exp-dep', action='store_true',
                         help="Pass --zero-exp-dep-rate to the simulation (zero the "
