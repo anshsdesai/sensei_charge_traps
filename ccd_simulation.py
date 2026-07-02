@@ -2149,6 +2149,11 @@ def run_single_trial(
         )
     # Guarantee a unique PRNG sequence for Numba across all forked child processes
     seed_numba(os.getpid() + (r * 10000))
+    # Also seed the legacy global np.random stream (np.random.poisson in
+    # take_fake_image, np.random.random in charge_trap_interaction): fork-started
+    # workers otherwise inherit identical state, correlating trials within a
+    # node (review F10). Trap/no-trap CRN pairing is unaffected.
+    np.random.seed((os.getpid() + (r * 10000)) % (2 ** 32))
     
     import h5py
     import os
