@@ -18,7 +18,11 @@ paper/*.out
 figures/*
 *.png
 *.csv
+!signed_refit_manifest.csv
 checks
+
+# F1 phase-split A/B test outputs (TEST DATA, see run_ab_v3phase_test.py)
+ab_test_v3phase*/
 
 # Method 3 completeness workspace generated artifacts
 trap_completeness_method3/cache/*

@@ -153,7 +153,7 @@ def _decode_h5_attr(value):
     return value
 
 
-def count_compatible_runs(outdir, phase_capture_ticks):
+def count_compatible_runs(outdir, phase_capture_ticks, v3_phase_fraction):
     """Count existing HDF5 outputs compatible with the active transport model."""
     compatible = 0
     incompatible = []
@@ -162,6 +162,8 @@ def count_compatible_runs(outdir, phase_capture_ticks):
             with h5py.File(filename, 'r') as f:
                 model = _decode_h5_attr(f.attrs.get('trap_transport_model', ''))
                 ticks = f.attrs.get('phase_capture_ticks', np.nan)
+                # Pre-phase-split files lack the attr -> NaN -> incompatible.
+                v3_frac = f.attrs.get('v3_phase_fraction', np.nan)
         except OSError as exc:
             incompatible.append((filename, f'unreadable HDF5: {exc}'))
             continue
@@ -169,13 +171,22 @@ def count_compatible_runs(outdir, phase_capture_ticks):
             ticks = float(ticks)
         except (TypeError, ValueError):
             ticks = np.nan
+        try:
+            v3_frac = float(v3_frac)
+        except (TypeError, ValueError):
+            v3_frac = np.nan
         if (
             model == EXPECTED_TRAP_TRANSPORT_MODEL
             and np.isclose(ticks, phase_capture_ticks, rtol=0.0, atol=1.0e-12)
+            and np.isclose(v3_frac, v3_phase_fraction, rtol=0.0, atol=1.0e-12)
         ):
             compatible += 1
         else:
-            incompatible.append((filename, f'model={model!r}, phase_capture_ticks={ticks!r}'))
+            incompatible.append((
+                filename,
+                f'model={model!r}, phase_capture_ticks={ticks!r}, '
+                f'v3_phase_fraction={v3_frac!r}',
+            ))
     return compatible, incompatible
 
 
@@ -257,6 +268,15 @@ def main():
         type=float,
         default=300.0,
         help="Effective V1/V3 phase-overlap capture window in 15 MHz sequencer ticks.",
+    )
+    parser.add_argument(
+        '--v3-phase-fraction',
+        type=float,
+        default=0.5,
+        help="Forwarded to run_ccd_simulation: fraction of traps on the V3 "
+             "clock phase (same-step self-recapture of their own emission); "
+             "V1 traps' emission always escapes. 1.0 reproduces the "
+             "pre-2026-07 all-V3 kernel for A/B comparison.",
     )
     parser.add_argument(
         '--binning-factors',
@@ -359,6 +379,7 @@ def main():
                     n_done, incompatible = count_compatible_runs(
                         outdir,
                         args.phase_capture_ticks,
+                        args.v3_phase_fraction,
                     )
                     todo.append(
                         (label, cond, histfile, vp, scale, outdir, n_done,
@@ -377,8 +398,9 @@ def main():
             print(
                 f"\n!!! {label}: {len(incompatible)} existing HDF5 files have "
                 f"incompatible trap transport metadata for model "
-                f"{EXPECTED_TRAP_TRANSPORT_MODEL!r} and phase_capture_ticks="
-                f"{args.phase_capture_ticks:g}. Use a new --out_base or "
+                f"{EXPECTED_TRAP_TRANSPORT_MODEL!r}, phase_capture_ticks="
+                f"{args.phase_capture_ticks:g} and v3_phase_fraction="
+                f"{args.v3_phase_fraction:g}. Use a new --out_base or "
                 "delete/regenerate the incompatible files."
             )
             for filename, reason in incompatible[:5]:
@@ -399,6 +421,7 @@ def main():
             '--packet-volume-um3', str(vp),
             '--binning', str(binning),
             '--phase-capture-ticks', str(args.phase_capture_ticks),
+            '--v3-phase-fraction', str(args.v3_phase_fraction),
             '--trap-density-scale', str(scale),
             '--exp-indep-charge-mode', args.exp_indep_charge_mode,
             '--clear-mode', clear_mode,

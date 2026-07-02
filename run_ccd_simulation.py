@@ -82,6 +82,17 @@ if __name__ == '__main__':
              "mode, the fixed 4->6->10->20 real-exposure cycle).",
     )
     parser.add_argument(
+        '--v3-phase-fraction',
+        type=float,
+        default=0.5,
+        help="Fraction of traps assigned to the V3 clock phase (Bernoulli per "
+             "trap). A V3 trap's readout/clear emission faces a same-step "
+             "recapture roll (packet crosses the trap on row exit); a V1 "
+             "trap's emission always escapes (packet crossed on entry). "
+             "Default 0.5; 1.0 reproduces the pre-2026-07 all-V3 kernel for "
+             "A/B comparison.",
+    )
+    parser.add_argument(
         '--zero-exp-dep-rate',
         action='store_true',
         help="Zero the injected single-electron dark current (exp_dep_rate=0) so "
@@ -162,6 +173,7 @@ if __name__ == '__main__':
         f"packet volume: {args.packet_volume_um3:g} um^3, "
         f"transport: {TRAP_TRANSPORT_MODEL}, "
         f"phase capture: {args.phase_capture_ticks:g} ticks ({args.phase_capture_ticks / 15e6:.3e} s), "
+        f"V3 phase fraction: {args.v3_phase_fraction:g}, "
         f"exposure-independent charge: {args.exp_indep_charge_mode}, "
         f"clear: {args.clear_mode}, "
         + (f"readout binning: {args.binning:g}x, " if args.binning != 1.0 else "")
@@ -197,6 +209,7 @@ if __name__ == '__main__':
                 itertools.repeat(args.pairsfile),          # (tau, sigma) pairs file (provenance)
                 itertools.repeat(args.binning),            # global readout binning factor (provenance)
                 itertools.repeat(args.zero_exp_dep_rate),  # zero single-e dark current (trap-only test)
+                itertools.repeat(args.v3_phase_fraction),  # V1/V3 clock-phase split (1.0 = old all-V3 kernel)
             ),
             total=num_runs,
             desc="Running Trials"
