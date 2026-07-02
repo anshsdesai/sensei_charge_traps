@@ -6,6 +6,41 @@ from numba import njit
 from scipy.stats import poisson
 from numpy.lib.stride_tricks import as_strided
 
+import os as _os
+
+# Default detected-dipole count (legacy `dipole_coord_list.npz`). Used only as a
+# fallback for callers that don't pass an explicit count or a coord-list file;
+# the campaign and run_ccd_simulation always derive the true count from disk.
+DEFAULT_N_DETECTED_TRAPS = 5171
+TRAP_TRANSPORT_MODEL = 'phase_limited_v1v3'
+
+
+def coord_list_for_tauhist(tauhistfile):
+    """Map a tau-histogram filename to the matching dipole coordinate-list file.
+
+    The detected-dipole count that seeds the baseline trap population lives in
+    `dipole_coord_list{suffix}.npz` (written by run_charge_traps.py), where the
+    only suffix that changes the raw dipole finding is `_minimal` (the minimal
+    pipeline). The `_caldet` detection tag and the `_upper_limit` / threshold
+    tags on the histogram do NOT change which dipoles were detected, so they are
+    ignored here. Returns a path in the same directory as `tauhistfile`.
+    """
+    directory = _os.path.dirname(tauhistfile)
+    base = _os.path.basename(tauhistfile)
+    suffix = '_minimal' if 'minimal' in base else ''
+    return _os.path.join(directory, f'dipole_coord_list{suffix}.npz')
+
+
+def detected_trap_count(coord_list_path):
+    """Number of detected dipoles in a `dipole_coord_list*.npz` file.
+
+    Matches run_charge_traps.py:266 `total = sum(len(q_list) for q_list ...)` --
+    the per-quadrant coordinate arrays summed across quadrants.
+    """
+    with np.load(coord_list_path, allow_pickle=True) as d:
+        return int(sum(len(d[k]) for k in d.files))
+
+
 def windowSum(data, windowsize, ndim):
     """Calculates the sliding-window sum of the N-dimensional data array."""
     window = (windowsize,) * ndim
@@ -734,22 +769,34 @@ def seed_numba(seed_value):
     np.random.seed(seed_value)
 
 @njit
-def fast_readout_numba(image, exp_acc, tpix_vertical, trap_rows, trap_cols, trap_taus, trap_kc, trapped_charge):
+def fast_readout_numba(
+    image,
+    exp_acc,
+    tpix_vertical,
+    trap_rows,
+    trap_cols,
+    trap_emit_probs,
+    trap_capture_alpha,
+    trap_is_v3,
+    trapped_charge,
+):
     """
     JIT-compiled C-speed readout loop using a stationary padded buffer.
-    Eliminates the O(R^2 C) memory shifting bottleneck.
 
-    Trap interactions follow two-state Shockley-Read-Hall kinetics for each
-    row-transfer dwell of duration tpix_vertical: a trap captures from the
-    packet sitting above it at rate lambda_c = q * kc (q = carriers in the
-    packet, kc = sigma * v_th / V_packet) and emits at rate
-    lambda_e = 1 / tau_e. Emitted carriers can be recaptured before the next
-    transfer, so the end-of-dwell trap state is drawn from the exact
-    two-state transition probabilities (which include any number of
-    capture/emission toggles within the dwell).
+    Phase-limited V1/V3 trap transport: emission is allowed across the full row
+    dwell, while capture and recapture are allowed only during one short phase
+    overlap window. ``trap_emit_probs`` is 1-exp(-t_row/tau), and
+    ``trap_capture_alpha`` is kc*t_phase, so P_capture(q) = 1-exp(-q*alpha).
+
+    ``trap_is_v3`` splits the catalog by clock phase. A V3 trap is crossed by
+    the packet on its way OUT of the row, after collecting the dwell's
+    emission, so its own emitted carrier faces a same-step recapture roll. A
+    V1 trap is crossed on the way IN: capture is checked on the arriving
+    packet before the dwell's emission, and an emitted carrier exits over V3
+    without recrossing the trap — it always escapes.
     """
     rows, cols = image.shape
-    n_traps = len(trap_taus)
+    n_traps = len(trap_emit_probs)
 
     # 1. Pad image with empty rows at the top to simulate empty space shifting in
     padded_image = np.zeros((2 * rows, cols), dtype=np.float64)
@@ -774,30 +821,38 @@ def fast_readout_numba(image, exp_acc, tpix_vertical, trap_rows, trap_cols, trap
 
             # The pixel that just shifted into the trap's physical row 'tr'
             current_pixel_row = tr + rows - 1 - t
-            q = padded_image[current_pixel_row, tc]
-            lam_e = 1.0 / trap_taus[i]
 
-            if trapped_charge[i] > 0.0:
-                # Occupied trap: an emitted carrier joins the q carriers in
-                # the packet above, so it is recaptured at rate (q+1)*kc
-                # until the packet shifts away.
-                lam_c = (q + 1.0) * trap_kc[i]
-                tot = lam_e + lam_c
-                p_free = (lam_e / tot) * (1.0 - np.exp(-tpix_vertical * tot))
-                if np.random.random() < p_free:
-                    padded_image[current_pixel_row, tc] += 1.0
-                    trapped_charge[i] -= 1.0
-            elif q >= 1.0:
-                # Empty trap under a charged packet: capture, allowing for
-                # re-emission within the same dwell.
-                lam_c = q * trap_kc[i]
-                tot = lam_e + lam_c
-                p_occ = (lam_c / tot) * (1.0 - np.exp(-tpix_vertical * tot))
-                if np.random.random() < p_occ:
-                    padded_image[current_pixel_row, tc] -= 1.0
-                    trapped_charge[i] += 1.0
-                    
-    # 4. Update Exposure Accumulator 
+            if trap_is_v3[i] == 1:
+                # V3: emit over the dwell, then one capture/recapture check as
+                # the packet (incl. any just-emitted carrier) crosses on exit.
+                if trapped_charge[i] > 0.0:
+                    if np.random.random() < trap_emit_probs[i]:
+                        padded_image[current_pixel_row, tc] += 1.0
+                        trapped_charge[i] = 0.0
+
+                q = padded_image[current_pixel_row, tc]
+                if trapped_charge[i] <= 0.0 and q >= 1.0:
+                    p_capture = 1.0 - np.exp(-q * trap_capture_alpha[i])
+                    if np.random.random() < p_capture:
+                        padded_image[current_pixel_row, tc] -= 1.0
+                        trapped_charge[i] = 1.0
+            else:
+                # V1: capture is checked on the arriving packet first; an
+                # emission during the dwell then escapes with no same-step
+                # recapture (the packet exits over V3, never recrossing V1).
+                q = padded_image[current_pixel_row, tc]
+                if trapped_charge[i] <= 0.0 and q >= 1.0:
+                    p_capture = 1.0 - np.exp(-q * trap_capture_alpha[i])
+                    if np.random.random() < p_capture:
+                        padded_image[current_pixel_row, tc] -= 1.0
+                        trapped_charge[i] = 1.0
+
+                if trapped_charge[i] > 0.0:
+                    if np.random.random() < trap_emit_probs[i]:
+                        padded_image[current_pixel_row, tc] += 1.0
+                        trapped_charge[i] = 0.0
+
+    # 4. Update Exposure Accumulator
     # (Vectorized the O(R^2 * C) addition loop into O(R * C))
     for sr in range(rows):
         add_val = (rows - 1 - sr) * tpix_vertical
@@ -809,8 +864,115 @@ def fast_readout_numba(image, exp_acc, tpix_vertical, trap_rows, trap_cols, trap
     for r in range(rows):
         for c in range(cols):
             image[r, c] = padded_image[r, c]
-            
+
     return output_stream
+
+
+@njit
+def fast_clear_numba(
+    image,
+    fast_shifts,
+    fast_dwell,
+    slow_shifts,
+    slow_dwell,
+    trap_rows,
+    trap_cols,
+    trap_emit_probs_fast,
+    trap_emit_probs_slow,
+    trap_capture_alpha,
+    trap_is_v3,
+    trapped_charge,
+):
+    """
+    Clock the active area through the two-block clear recipe.
+
+    Clear transport uses the same phase-limited V1/V3 model as readout. Capture
+    is limited to the short phase-overlap dwell for every vertical shift; the
+    emission probability is set by the full fast or slow clear dwell. The
+    per-trap phase split matches ``fast_readout_numba``: V3 traps get a
+    same-step recapture check on their own emission, V1 traps do not.
+    """
+    rows, cols = image.shape
+    n_traps = len(trap_capture_alpha)
+    total_shifts = fast_shifts + slow_shifts
+
+    # Leading empty packets clock into the active area. Keeping the charge
+    # stream stationary in this padded buffer avoids shifting a dense image
+    # on every clear step.
+    padded_image = np.zeros((total_shifts + rows, cols), dtype=np.float64)
+    for r in range(rows):
+        for c in range(cols):
+            padded_image[r + total_shifts, c] = image[r, c]
+
+    for t in range(total_shifts):
+        emit_probs = trap_emit_probs_fast if t < fast_shifts else trap_emit_probs_slow
+
+        for i in range(n_traps):
+            tr = trap_rows[i]
+            tc = trap_cols[i]
+
+            # Packet shifted into physical trap row tr on this clear step.
+            current_pixel_row = tr + total_shifts - 1 - t
+
+            if trap_is_v3[i] == 1:
+                if trapped_charge[i] > 0.0:
+                    if np.random.random() < emit_probs[i]:
+                        padded_image[current_pixel_row, tc] += 1.0
+                        trapped_charge[i] = 0.0
+
+                q = padded_image[current_pixel_row, tc]
+                if trapped_charge[i] <= 0.0 and q >= 1.0:
+                    p_capture = 1.0 - np.exp(-q * trap_capture_alpha[i])
+                    if np.random.random() < p_capture:
+                        padded_image[current_pixel_row, tc] -= 1.0
+                        trapped_charge[i] = 1.0
+            else:
+                q = padded_image[current_pixel_row, tc]
+                if trapped_charge[i] <= 0.0 and q >= 1.0:
+                    p_capture = 1.0 - np.exp(-q * trap_capture_alpha[i])
+                    if np.random.random() < p_capture:
+                        padded_image[current_pixel_row, tc] -= 1.0
+                        trapped_charge[i] = 1.0
+
+                if trapped_charge[i] > 0.0:
+                    if np.random.random() < emit_probs[i]:
+                        padded_image[current_pixel_row, tc] += 1.0
+                        trapped_charge[i] = 0.0
+
+    # Charge still resident in the active area immediately after the final
+    # shift. CCD.simulate_clear records it, then the clear boundary discards
+    # all free surface charge while retaining trap occupancy.
+    for r in range(rows):
+        for c in range(cols):
+            image[r, c] = padded_image[r, c]
+
+
+@njit
+def drain_traps_empty_numba(trap_taus, trap_capture_alpha, trap_is_v3,
+                            trapped_charge, dwell, n_shifts):
+    """
+    Drain traps through the empty-packet tail of a continuous clear.
+
+    A V1 trap's emission escapes freely, so it drains with the recapture-free
+    closed form 1-exp(-T/tau) over T = dwell*n_shifts. A V3 trap's emitted
+    carrier joins the (empty) passing packet and faces the same-gate recapture
+    roll 1-exp(-alpha) on exit, independent of shift speed, so only a fraction
+    exp(-alpha) of emissions escape: in the fast-shift limit (dwell << tau) the
+    escape is a thinned Poisson process with rate exp(-alpha)/tau, giving
+    P_drain = 1-exp(-T*exp(-alpha)/tau).
+    """
+    total_dwell = dwell * n_shifts
+    n_traps = len(trap_taus)
+    for i in range(n_traps):
+        if trapped_charge[i] > 0.0:
+            if trap_is_v3[i] == 1:
+                escape_rate = np.exp(-trap_capture_alpha[i]) / trap_taus[i]
+            else:
+                escape_rate = 1.0 / trap_taus[i]
+            p_emit = 1.0 - np.exp(-total_dwell * escape_rate)
+            if np.random.random() < p_emit:
+                trapped_charge[i] = 0.0
+
 
 
 class CCD:
@@ -825,7 +987,15 @@ class CCD:
         runconditions='minos',
         trap_density_scale=1.0,
         packet_volume_um3=3.0,
+        phase_capture_ticks=300.0,
         temperature_K=135.0,
+        exp_indep_charge_mode='pre_readout',
+        clear_mode='sequencer',
+        binning_0h_factor=32.0,
+        binning=1.0,
+        n_detected_traps=DEFAULT_N_DETECTED_TRAPS,
+        zero_exp_dep_rate=False,
+        v3_phase_fraction=0.5,
     ):
         import numpy as np
         # self.original_image = np.copy(image_array)
@@ -834,6 +1004,33 @@ class CCD:
         self.tpix_horizontal = tpix_horizontal
         self.tpix_vertical = tpix_vertical
         self.runconditions = runconditions
+        valid_exp_indep_charge_modes = ('pre_readout', 'post_readout')
+        if exp_indep_charge_mode not in valid_exp_indep_charge_modes:
+            raise ValueError(
+                f"Unknown exp_indep_charge_mode={exp_indep_charge_mode!r}; "
+                f"expected one of {valid_exp_indep_charge_modes}"
+            )
+        self.exp_indep_charge_mode = exp_indep_charge_mode
+        valid_clear_modes = (
+            'instantaneous', 'sequencer', 'three_hour', 'binned_0h'
+        )
+        if clear_mode not in valid_clear_modes:
+            raise ValueError(
+                f"Unknown clear_mode={clear_mode!r}; "
+                f"expected one of {valid_clear_modes}"
+            )
+        self.clear_mode = clear_mode
+        # 'binned_0h' data-taking strategy: never run a hardware clear; instead a
+        # binned (and therefore faster-readout) 0 h image is taken after every
+        # real exposure, both resetting the array and serving as the 0 h
+        # baseline. Binning shortens the readout, so the per-row trap dwell for
+        # those 0 h images is tpix_vertical / binning_0h_factor.
+        self.binning_0h_factor = float(binning_0h_factor)
+        # Global readout binning factor. The caller has already divided tpix /
+        # tpix_vertical by this; it is stored only for HDF5 provenance and the
+        # per-file consistency guard (binning changes the readout dwell, so two
+        # different binnings must not share an output directory).
+        self.binning = float(binning)
         if runconditions == 'snolab':
             print("Using snolab run conditions, assuming 10x fewer high energy events")
 
@@ -852,6 +1049,62 @@ class CCD:
         self.unmasked_pixels = []
         self.unmasked_pixels_no_traps = []
 
+        # temp_scan_run1_clearseq.xml at the 15 MHz sequencer clock.
+        self.clear_sequence = 'temp_scan_run1_clearseq.xml'
+        self.clear_clock_hz = 15e6
+        self.trap_transport_model = TRAP_TRANSPORT_MODEL
+        self.phase_capture_ticks = float(phase_capture_ticks)
+        if self.phase_capture_ticks < 0:
+            raise ValueError('phase_capture_ticks must be non-negative')
+        self.phase_capture_dwell_s = self.phase_capture_ticks / self.clear_clock_hz
+        self.clear_vertical_phase_count = 6
+        self.clear_horizontal_phase_count = 6
+        self.clear_delay_vertical_ticks = 300
+        self.clear_delay_horizontal_ticks = 150
+        self.clear_delay_switch_ticks = 8
+        self.clear_delay_reset_gate_ticks = 15
+        self.clear_fast_shifts = 1500
+        self.clear_fast_horizontal_steps = 10
+        self.clear_slow_shifts = 10
+        self.clear_slow_horizontal_steps = 3500
+
+        vertical_ticks = (
+            self.clear_vertical_phase_count * self.clear_delay_vertical_ticks
+        )
+        horizontal_step_ticks = (
+            self.clear_delay_switch_ticks
+            + self.clear_horizontal_phase_count * self.clear_delay_horizontal_ticks
+            + self.clear_delay_reset_gate_ticks
+        )
+        self.clear_fast_dwell_s = (
+            vertical_ticks
+            + self.clear_fast_horizontal_steps * horizontal_step_ticks
+        ) / self.clear_clock_hz
+        self.clear_slow_dwell_s = (
+            vertical_ticks
+            + self.clear_slow_horizontal_steps * horizontal_step_ticks
+        ) / self.clear_clock_hz
+        self.clear_total_time_s = (
+            self.clear_fast_shifts * self.clear_fast_dwell_s
+            + self.clear_slow_shifts * self.clear_slow_dwell_s
+        )
+
+        # 'three_hour' clear: a data-taking strategy that runs the clear
+        # continuously for 3 hours instead of the ~3.26 s standard recipe. After
+        # the image flush (handled by fast_clear_numba) every packet is empty, so
+        # the remaining time is modelled as continuous fast vertical shifts that
+        # drain the traps (drain_traps_empty_numba). The shift count is derived
+        # from the duration and the fast-shift dwell.
+        self.clear_three_hour_seconds = 3.0 * 3600.0
+        self.clear_three_hour_fast_shifts = int(
+            round(self.clear_three_hour_seconds / self.clear_fast_dwell_s)
+        )
+
+        self.clear_occupied_traps_before = []
+        self.clear_occupied_traps_after = []
+        self.clear_surface_electrons_before = []
+        self.clear_surface_electrons_after_transport = []
+
 
         self.UL_expdep = 8.19e-5 #e / pix / day
 
@@ -869,6 +1122,13 @@ class CCD:
 
         self.LR_expindep = 6.52e-5 #e / pix / image
         self.exp_dep_rate = self.UR_expdep / (24 * 3600) #e / pix / s
+        # Trap-only hypothesis test: zero the injected single-electron dark
+        # current so trap emission is the sole exposure-dependent single-e
+        # source. High-energy cosmic events and exposure-independent spurious
+        # charge are untouched.
+        self.zero_exp_dep_rate = bool(zero_exp_dep_rate)
+        if self.zero_exp_dep_rate:
+            self.exp_dep_rate = 0.0
         self.exp_indep_rate = self.UR_expindep #e / pix / image
 
         self.total_pix = (6144)* (1024)
@@ -910,7 +1170,12 @@ class CCD:
         # --- OPTIMIZATION 1: SPARSE TRAP STORAGE ---
         # Instead of a full boolean mask, store the coordinates of traps
         # trap_density calculation remains the same...
-        baseline_trap_density = (5171 / 4) / (self.nrow_quad * self.ncol_quad)
+        # Baseline trap population = the detected dipole count (run_charge_traps
+        # `dipole_coord_list*.npz`), spread over the four quadrants. Passed in so
+        # it tracks the actual detection (e.g. 5171 legacy vs 9333 minimal)
+        # instead of a stale literal; the upper-limit scale corrects this upward.
+        self.n_detected_traps = int(n_detected_traps)
+        baseline_trap_density = (self.n_detected_traps / 4) / (self.nrow_quad * self.ncol_quad)
         trap_density = baseline_trap_density * trap_density_scale
         if not 0 <= trap_density <= 1:
             raise ValueError(
@@ -957,6 +1222,27 @@ class CCD:
         v_th = hole_thermal_velocity(temperature_K)  # cm/s
         packet_volume_cm3 = packet_volume_um3 * 1e-12
         self.trap_kc = self.trap_sigmas * v_th / packet_volume_cm3  # per-carrier capture rate [1/s]
+        # The measured pocket-pumped catalog is treated as V1/V3 traps. V2
+        # traps would be a separate, unmeasured population and are not included
+        # in this baseline transport model.
+        self.trap_capture_alpha = self.trap_kc * self.phase_capture_dwell_s
+        # Per-trap clock-phase assignment. Pumping cannot distinguish V1 from
+        # V3, but transport can: a V3 trap is crossed by the packet on row
+        # EXIT (its own emission gets a same-step recapture roll), a V1 trap
+        # on row ENTRY (its emission escapes over V3 with no recapture).
+        # Bernoulli split with fraction `v3_phase_fraction` (1.0 reproduces
+        # the pre-2026-07 all-V3 readout/clear kernel).
+        self.v3_phase_fraction = float(v3_phase_fraction)
+        if not 0.0 <= self.v3_phase_fraction <= 1.0:
+            raise ValueError(
+                f"v3_phase_fraction={v3_phase_fraction} must be in [0, 1]"
+            )
+        self.trap_is_v3 = (
+            rng.random(num_traps) < self.v3_phase_fraction
+        ).astype(np.uint8)
+        self.readout_emit_probs = 1.0 - np.exp(-self.tpix_vertical / self.trap_taus)
+        self.clear_fast_emit_probs = 1.0 - np.exp(-self.clear_fast_dwell_s / self.trap_taus)
+        self.clear_slow_emit_probs = 1.0 - np.exp(-self.clear_slow_dwell_s / self.trap_taus)
 
         # Store trapped charge as a 1D array (much faster than 2D)
         self.trapped_charge_1d = np.zeros(num_traps, dtype=float)
@@ -1005,46 +1291,91 @@ class CCD:
 
     def charge_trap_interaction(self, current_image, dt):
         import numpy as np
-        # --- OPTIMIZATION 2: SPARSE INTERACTION ---
-        # Two-state SRH kinetics over a static dwell of duration dt (the
-        # exposure): capture at rate q*kc from the charge sitting in the
-        # trap's own pixel, emission at rate 1/tau_e, with recapture of
-        # emitted carriers. Same model as fast_readout_numba but vectorized.
+        # The measured pocket-pumped traps are V1/V3 traps. During static
+        # exposure the charge is parked under V2, so empty measured traps do not
+        # capture from exposure charge. Occupied traps can still emit into their
+        # pixel and then remain empty.
         if dt <= 0:
             return current_image
 
-        q = current_image[self.trap_indices]
-        lam_e = 1.0 / self.trap_taus
-        n_traps = len(self.trap_taus)
-        random_rolls = np.random.random(n_traps)
-
         occupied = self.trapped_charge_1d > 0
+        if not np.any(occupied):
+            return current_image
 
-        # Occupied traps: emitted carrier joins the q carriers in the pixel,
-        # recaptured at rate (q+1)*kc until the end of the exposure.
-        lam_c_occ = (q + 1.0) * self.trap_kc
-        tot_occ = lam_e + lam_c_occ
-        p_free = (lam_e / tot_occ) * (1.0 - np.exp(-dt * tot_occ))
-        should_release = occupied & (random_rolls < p_free)
-
-        # Empty traps under a charged pixel: capture, allowing re-emission
-        # within the exposure.
-        lam_c_emp = q * self.trap_kc
-        tot_emp = lam_e + lam_c_emp
-        p_occ = np.where(q >= 1.0, (lam_c_emp / tot_emp) * (1.0 - np.exp(-dt * tot_emp)), 0.0)
-        should_capture = (~occupied) & (random_rolls < p_occ)
+        p_release = 1.0 - np.exp(-dt / self.trap_taus)
+        random_rolls = np.random.random(len(self.trap_taus))
+        should_release = occupied & (random_rolls < p_release)
 
         releasing_rows = self.trap_indices[0][should_release]
         releasing_cols = self.trap_indices[1][should_release]
         current_image[releasing_rows, releasing_cols] += 1.0
-        self.trapped_charge_1d[should_release] -= 1.0
-
-        capturing_rows = self.trap_indices[0][should_capture]
-        capturing_cols = self.trap_indices[1][should_capture]
-        current_image[capturing_rows, capturing_cols] -= 1.0
-        self.trapped_charge_1d[should_capture] += 1.0
+        self.trapped_charge_1d[should_release] = 0.0
 
         return current_image
+
+
+
+    def simulate_clear(self):
+        import numpy as np
+
+        if self.clear_mode == 'binned_0h':
+            # No hardware clear in this mode: the binned 0 h readouts (issued by
+            # take_fake_image after every real exposure) empty free charge and
+            # reset the array. Trap occupancy carries over untouched.
+            return
+
+        self.clear_occupied_traps_before.append(
+            int(np.count_nonzero(self.trapped_charge_1d))
+        )
+        self.clear_surface_electrons_before.append(float(np.sum(self.ccd_state)))
+
+        if (
+            self.clear_mode in ('sequencer', 'three_hour')
+            and (
+                np.any(self.ccd_state != 0)
+                or np.any(self.trapped_charge_1d > 0)
+            )
+        ):
+            # Transport resident image charge out with phase-limited V1/V3
+            # capture and full-dwell emission. For 'three_hour' this is the
+            # image-flush phase; the pure-emission empty tail follows below.
+            fast_clear_numba(
+                self.ccd_state,
+                self.clear_fast_shifts,
+                self.clear_fast_dwell_s,
+                self.clear_slow_shifts,
+                self.clear_slow_dwell_s,
+                self.trap_indices[0],
+                self.trap_indices[1],
+                self.clear_fast_emit_probs,
+                self.clear_slow_emit_probs,
+                self.trap_capture_alpha,
+                self.trap_is_v3,
+                self.trapped_charge_1d,
+            )
+
+        if self.clear_mode == 'three_hour' and np.any(self.trapped_charge_1d > 0):
+            # Remaining ~3 h of continuous fast shifts past empty packets,
+            # drained analytically: recapture-free for V1 traps, recapture-
+            # thinned for V3 traps (see drain_traps_empty_numba).
+            drain_traps_empty_numba(
+                self.trap_taus,
+                self.trap_capture_alpha,
+                self.trap_is_v3,
+                self.trapped_charge_1d,
+                self.clear_fast_dwell_s,
+                self.clear_three_hour_fast_shifts,
+            )
+
+        self.clear_occupied_traps_after.append(
+            int(np.count_nonzero(self.trapped_charge_1d))
+        )
+        self.clear_surface_electrons_after_transport.append(
+            float(np.sum(self.ccd_state))
+        )
+
+        # The hardware clear removes free surface charge, not trapped charge.
+        self.ccd_state.fill(0.0)
 
 
 
@@ -1056,28 +1387,24 @@ class CCD:
 
 
         exp = exposure_time_hours * 3600
+        self.simulate_clear()
         self.exposures.append(exp)
 
         self.ccd_state = self.charge_trap_interaction(self.ccd_state,exp)
 
         
-        exp_dep_events = self.exp_dep_rate * exp * self.npix_per_quad #assume not much during readout -- maybe not a great assumption but whatever
+        exp_dep_events_expected = self.exp_dep_rate * exp * self.npix_per_quad
+        n_exp_dep_events = np.random.poisson(exp_dep_events_expected)
+        n_exp_indep_events = np.random.poisson(self.exp_indep_events)
 
         # print(self.npix_per_quad)
-        # exp_dep_events = exp_dep_events
-        # print(exp,exp_dep_events,self.exp_indep_events)
-
-
-
-
-        n_singlee_events_expected = exp_dep_events + self.exp_indep_events
-
-        n_singlee_events = np.random.poisson(n_singlee_events_expected)
+        # print(exp, exp_dep_events_expected, self.exp_indep_events)
 
         
 
 
-        # print(f'Number of single electron events from rate to inject: {n_singlee_events}')
+        # print(f'Exposure-dependent events: {n_exp_dep_events}')
+        # print(f'Exposure-independent events: {n_exp_indep_events}')
         #now generate fake image
         file = 'minos_image/proc_corr_proc_skp_72000secs_exp_run10_NSAMP_300_36.fits'
 
@@ -1095,8 +1422,19 @@ class CCD:
 
 
 
-
-        q0_fake = inject_single_e(q0_blank, n_events=n_singlee_events, intensity=1,exclusion_mask=None)
+        q0_fake = inject_single_e(
+            q0_blank,
+            n_events=n_exp_dep_events,
+            intensity=1,
+            exclusion_mask=None,
+        )
+        if self.exp_indep_charge_mode == 'pre_readout':
+            q0_fake = inject_single_e(
+                q0_fake,
+                n_events=n_exp_indep_events,
+                intensity=1,
+                exclusion_mask=None,
+            )
         # self.no_trap_images.append(q0_fake)
 
         self.ccd_state += q0_fake
@@ -1108,8 +1446,28 @@ class CCD:
         # exp_image = np.zeros_like(q0_fake,dtype=float)
 
         # self.simulate_readout()
-        img_trap = self.simulate_readout()
-        img_notrap = q0_fake
+        # In 'binned_0h' mode the 0 h images are read out binned -> shorter
+        # per-row dwell (faster readout), which is what resets the array in place
+        # of a hardware clear.
+        readout_tpix_vertical = None
+        if self.clear_mode == 'binned_0h' and exposure_time_hours == 0:
+            readout_tpix_vertical = self.tpix_vertical / self.binning_0h_factor
+        img_trap = self.simulate_readout(tpix_vertical=readout_tpix_vertical)
+        img_notrap = q0_fake.astype(np.float64, copy=True)
+
+        if self.exp_indep_charge_mode == 'post_readout':
+            # Spurious/readout-generated charge does not traverse active-area
+            # traps. Add one shared realization after readout so the trap and
+            # no-trap branches retain their common-random-number cancellation.
+            post_readout_charge = np.zeros_like(img_trap)
+            post_readout_charge = inject_single_e(
+                post_readout_charge,
+                n_events=n_exp_indep_events,
+                intensity=1,
+                exclusion_mask=None,
+            )
+            img_trap += post_readout_charge
+            img_notrap += post_readout_charge
         
         if store_image:
             self.reconstructed_images.append(img_trap)
@@ -1132,9 +1490,6 @@ class CCD:
         b_notrap[generate_halo_mask(img_notrap, threshold=100, radius=60)] |= BIT_HALO
         b_notrap[generate_column_bleed_mask(img_notrap, threshold=100, direction='up')] |= BIT_BLEED
         self.notrap_bitmasks.append(b_notrap)
-
-        #simulate a clear
-        self.ccd_state *= 0
 
         # self.exposure_images.append(exp_image)
 
@@ -1724,21 +2079,33 @@ class CCD:
         # self.unmasked_pixels_no_traps.append(unmasked_pix_notraps)
 
 
-    def simulate_readout(self):
+    def simulate_readout(self, tpix_vertical=None):
         import numpy as np
 
-        
+        # A binned readout clocks faster, so callers (e.g. the binned 0 h images
+        # in 'binned_0h' mode) can pass a shorter per-row dwell; default is the
+        # nominal full-frame readout time.
+        if tpix_vertical is None:
+            tpix_vertical = self.tpix_vertical
+
         # print(f"Starting Readout...")
         # image = self.ccd_state
         image = self.ccd_state.copy()
         rows, cols = image.shape
-        
+
+        if tpix_vertical == self.tpix_vertical:
+            trap_emit_probs = self.readout_emit_probs
+        else:
+            trap_emit_probs = 1.0 - np.exp(-tpix_vertical / self.trap_taus)
+
         # Use the Numba JIT compiled C-loop to eliminate the python iteration bottleneck
         result_flat = fast_readout_numba(
-            image, self.exposure_accumulator, self.tpix_vertical,
+            image, self.exposure_accumulator, tpix_vertical,
             self.trap_indices[0], self.trap_indices[1],
-            self.trap_taus, self.trap_kc, self.trapped_charge_1d
+            trap_emit_probs, self.trap_capture_alpha, self.trap_is_v3,
+            self.trapped_charge_1d
         )
+        self.ccd_state[:] = image
 
         result_reconstructed= result_flat.reshape(rows, cols)
         result_reconstructed = np.flipud(np.fliplr(result_reconstructed))
@@ -1760,9 +2127,26 @@ def run_single_trial(
     outdir='./',
     trap_density_scale=1.0,
     packet_volume_um3=3.0,
+    phase_capture_ticks=300.0,
+    exp_indep_charge_mode='pre_readout',
+    clear_mode='sequencer',
+    binning_0h_factor=32.0,
+    exposure_order='shuffled',
+    n_detected_traps=DEFAULT_N_DETECTED_TRAPS,
+    tauhistfile='',
+    pairsfile='',
+    binning=1.0,
+    zero_exp_dep_rate=False,
+    v3_phase_fraction=0.5,
 ):
     """This function contains everything needed for a single trial"""
     import os
+    valid_exposure_orders = ('shuffled', 'ordered')
+    if exposure_order not in valid_exposure_orders:
+        raise ValueError(
+            f"Unknown exposure_order={exposure_order!r}; "
+            f"expected one of {valid_exposure_orders}"
+        )
     # Guarantee a unique PRNG sequence for Numba across all forked child processes
     seed_numba(os.getpid() + (r * 10000))
     
@@ -1773,6 +2157,106 @@ def run_single_trial(
 
     filename = outdir + f'ccd_traps_run{r}.h5'
     if os.path.exists(filename):
+        with h5py.File(filename, 'r') as existing:
+            existing_mode = existing.attrs.get(
+                'exp_indep_charge_mode',
+                'pre_readout',
+            )
+            existing_clear_mode = existing.attrs.get(
+                'clear_mode',
+                'instantaneous',
+            )
+            existing_exposure_order = existing.attrs.get(
+                'exposure_order',
+                'shuffled',
+            )
+            existing_trap_transport_model = existing.attrs.get(
+                'trap_transport_model',
+                '',
+            )
+            existing_phase_capture_ticks = existing.attrs.get(
+                'phase_capture_ticks',
+                np.nan,
+            )
+            # Files written before the V1/V3 phase split default to NaN so
+            # they can never silently mix with post-split runs in one dir.
+            existing_v3_phase_fraction = existing.attrs.get(
+                'v3_phase_fraction',
+                np.nan,
+            )
+            existing_binning = existing.attrs.get('binning', 1.0)
+        if isinstance(existing_mode, bytes):
+            existing_mode = existing_mode.decode()
+        if isinstance(existing_clear_mode, bytes):
+            existing_clear_mode = existing_clear_mode.decode()
+        if isinstance(existing_exposure_order, bytes):
+            existing_exposure_order = existing_exposure_order.decode()
+        if isinstance(existing_trap_transport_model, bytes):
+            existing_trap_transport_model = existing_trap_transport_model.decode()
+        try:
+            existing_phase_capture_ticks = float(existing_phase_capture_ticks)
+        except (TypeError, ValueError):
+            existing_phase_capture_ticks = np.nan
+        try:
+            existing_binning = float(existing_binning)
+        except (TypeError, ValueError):
+            existing_binning = np.nan
+        if existing_mode != exp_indep_charge_mode:
+            raise RuntimeError(
+                f"{filename} was generated with exp_indep_charge_mode="
+                f"{existing_mode!r}, not {exp_indep_charge_mode!r}. "
+                "Use a separate output directory."
+            )
+        if existing_clear_mode != clear_mode:
+            raise RuntimeError(
+                f"{filename} was generated with clear_mode="
+                f"{existing_clear_mode!r}, not {clear_mode!r}. "
+                "Use a separate output directory."
+            )
+        if existing_exposure_order != exposure_order:
+            raise RuntimeError(
+                f"{filename} was generated with exposure_order="
+                f"{existing_exposure_order!r}, not {exposure_order!r}. "
+                "Use a separate output directory."
+            )
+        if existing_trap_transport_model != TRAP_TRANSPORT_MODEL:
+            raise RuntimeError(
+                f"{filename} was generated with trap_transport_model="
+                f"{existing_trap_transport_model!r}, not {TRAP_TRANSPORT_MODEL!r}. "
+                "Use a separate output directory or regenerate this file."
+            )
+        if not np.isclose(
+            existing_phase_capture_ticks,
+            float(phase_capture_ticks),
+            rtol=0.0,
+            atol=1.0e-12,
+        ):
+            raise RuntimeError(
+                f"{filename} was generated with phase_capture_ticks="
+                f"{existing_phase_capture_ticks!r}, not {phase_capture_ticks!r}. "
+                "Use a separate output directory or regenerate this file."
+            )
+        if not np.isclose(existing_binning, float(binning), rtol=0.0, atol=1.0e-12):
+            raise RuntimeError(
+                f"{filename} was generated with binning={existing_binning!r}, "
+                f"not {binning!r}. Use a separate output directory."
+            )
+        try:
+            existing_v3_phase_fraction = float(existing_v3_phase_fraction)
+        except (TypeError, ValueError):
+            existing_v3_phase_fraction = np.nan
+        if not np.isclose(
+            existing_v3_phase_fraction,
+            float(v3_phase_fraction),
+            rtol=0.0,
+            atol=1.0e-12,
+        ):
+            raise RuntimeError(
+                f"{filename} was generated with v3_phase_fraction="
+                f"{existing_v3_phase_fraction!r}, not {v3_phase_fraction!r} "
+                "(NaN = pre-phase-split file). "
+                "Use a separate output directory or regenerate this file."
+            )
         return r
 
     CCDTest = CCD(
@@ -1785,14 +2269,53 @@ def run_single_trial(
         runconditions=runconditions,
         trap_density_scale=trap_density_scale,
         packet_volume_um3=packet_volume_um3,
+        phase_capture_ticks=phase_capture_ticks,
+        exp_indep_charge_mode=exp_indep_charge_mode,
+        clear_mode=clear_mode,
+        binning_0h_factor=binning_0h_factor,
+        binning=binning,
+        n_detected_traps=n_detected_traps,
+        zero_exp_dep_rate=zero_exp_dep_rate,
+        v3_phase_fraction=v3_phase_fraction,
     )
 
-    for i in range(100):
-        CCDTest.take_fake_image(0)  # 0h exposure
-        CCDTest.take_fake_image(4)  # 4h exposure
-        CCDTest.take_fake_image(6)  # 6h exposure
-        CCDTest.take_fake_image(10) # 10h exposure
-        CCDTest.take_fake_image(20) # 20h exposure
+    # Order of the full image sequence. With the fixed 0->4->6->10->20 ordering
+    # ('ordered'), every 0 h image was always preceded by a 20 h image (maximal
+    # trap fill), so the trap occupancy entering each exposure slot was
+    # systematically biased -- inflating the 0 h trap excess and tilting the
+    # fitted exposure-dependent rate. The default 'shuffled' order permutes the
+    # whole 500-image sequence (100 of each exposure) together rather than
+    # cycle-by-cycle: within a single 5-element permutation, sampling without
+    # replacement leaves a residual anticorrelation between an image's exposure
+    # and its predecessor's, whereas a full shuffle draws each predecessor from
+    # the entire pool, decoupling the trap background (sourced by prior
+    # exposures) from the current exposure to the ~1/N level. 'ordered'
+    # reproduces the old fixed-cycle behaviour for comparison. A dedicated,
+    # per-trial-seeded Generator keeps the shuffle reproducible without
+    # perturbing the global np.random / Numba streams used by the physics.
+    n_cycles = 100
+    do_shuffle = (exposure_order == 'shuffled')
+    shuffle_rng = np.random.default_rng(r)
+    if clear_mode == 'binned_0h':
+        # No hardware clear and no nominal 0 h slot. The real (long) exposures
+        # are taken in 'shuffled' or fixed 'ordered' order, and a binned 0 h
+        # image is taken after every one of them to reset the array (replacing
+        # the clear) and provide the 0 h baseline.
+        real_exposures = [4, 6, 10, 20]
+        real_sequence = real_exposures * n_cycles
+        if do_shuffle:
+            shuffle_rng.shuffle(real_sequence)
+        full_sequence = []
+        for exposure in real_sequence:
+            full_sequence.append(exposure)
+            full_sequence.append(0)
+    else:
+        exposure_schedule = [0, 4, 6, 10, 20]
+        full_sequence = exposure_schedule * n_cycles
+        if do_shuffle:
+            shuffle_rng.shuffle(full_sequence)
+    for exposure in full_sequence:
+        CCDTest.take_fake_image(exposure)
 
     CCDTest.process_run()
 
@@ -1807,14 +2330,71 @@ def run_single_trial(
         f.create_dataset('exposures',         data=np.array(CCDTest.exposures))
         f.create_dataset('trap_taus',         data=CCDTest.trap_taus)
         f.create_dataset('trap_sigmas',       data=CCDTest.trap_sigmas)
+        f.create_dataset('trap_is_v3',        data=CCDTest.trap_is_v3)
         f.create_dataset('trap_indices_rows', data=CCDTest.trap_indices[0].astype(np.int32))
         f.create_dataset('trap_indices_cols', data=CCDTest.trap_indices[1].astype(np.int32))
         f.create_dataset('tau_weights',       data=np.array(tau_weights))
         f.create_dataset('tau_edges',         data=np.array(tau_edges))
+        f.create_dataset(
+            'clear_occupied_traps_before',
+            data=np.array(CCDTest.clear_occupied_traps_before, dtype=np.int32),
+        )
+        f.create_dataset(
+            'clear_occupied_traps_after',
+            data=np.array(CCDTest.clear_occupied_traps_after, dtype=np.int32),
+        )
+        f.create_dataset(
+            'clear_surface_electrons_before',
+            data=np.array(CCDTest.clear_surface_electrons_before),
+        )
+        f.create_dataset(
+            'clear_surface_electrons_after_transport',
+            data=np.array(CCDTest.clear_surface_electrons_after_transport),
+        )
         f.attrs['trap_density'] = CCDTest.trap_density
         f.attrs['trap_density_scale'] = CCDTest.trap_density_scale
+        f.attrs['n_detected_traps'] = CCDTest.n_detected_traps
+        f.attrs['exp_dep_rate'] = CCDTest.exp_dep_rate
+        f.attrs['zero_exp_dep_rate'] = CCDTest.zero_exp_dep_rate
         f.attrs['packet_volume_um3'] = CCDTest.packet_volume_um3
+        f.attrs['trap_transport_model'] = CCDTest.trap_transport_model
+        f.attrs['v3_phase_fraction'] = CCDTest.v3_phase_fraction
+        f.attrs['phase_capture_ticks'] = CCDTest.phase_capture_ticks
+        f.attrs['phase_capture_dwell_s'] = CCDTest.phase_capture_dwell_s
         f.attrs['temperature_K'] = CCDTest.temperature_K
+        f.attrs['exp_indep_charge_mode'] = CCDTest.exp_indep_charge_mode
+        f.attrs['clear_mode'] = CCDTest.clear_mode
+        f.attrs['clear_sequence'] = CCDTest.clear_sequence
+        f.attrs['clear_clock_hz'] = CCDTest.clear_clock_hz
+        f.attrs['clear_vertical_phase_count'] = CCDTest.clear_vertical_phase_count
+        f.attrs['clear_horizontal_phase_count'] = CCDTest.clear_horizontal_phase_count
+        f.attrs['clear_delay_vertical_ticks'] = CCDTest.clear_delay_vertical_ticks
+        f.attrs['clear_delay_horizontal_ticks'] = CCDTest.clear_delay_horizontal_ticks
+        f.attrs['clear_delay_switch_ticks'] = CCDTest.clear_delay_switch_ticks
+        f.attrs['clear_delay_reset_gate_ticks'] = CCDTest.clear_delay_reset_gate_ticks
+        f.attrs['clear_fast_shifts'] = CCDTest.clear_fast_shifts
+        f.attrs['clear_fast_horizontal_steps'] = CCDTest.clear_fast_horizontal_steps
+        f.attrs['clear_fast_dwell_s'] = CCDTest.clear_fast_dwell_s
+        f.attrs['clear_slow_shifts'] = CCDTest.clear_slow_shifts
+        f.attrs['clear_slow_horizontal_steps'] = CCDTest.clear_slow_horizontal_steps
+        f.attrs['clear_slow_dwell_s'] = CCDTest.clear_slow_dwell_s
+        f.attrs['clear_total_time_s'] = CCDTest.clear_total_time_s
+        f.attrs['clear_three_hour_seconds'] = CCDTest.clear_three_hour_seconds
+        f.attrs['clear_three_hour_fast_shifts'] = CCDTest.clear_three_hour_fast_shifts
+        f.attrs['binning_0h_factor'] = CCDTest.binning_0h_factor
+        f.attrs['binning'] = CCDTest.binning
+        f.attrs['exposure_order'] = exposure_order
+        # Seed-catalog provenance: which (tau, sigma) pairs / tau histogram
+        # seeded this run, and the derived analysis flavor. Lets downstream
+        # plotting self-route by the catalog that produced the data rather than
+        # relying solely on the rundir path heuristic.
+        f.attrs['tauhistfile'] = tauhistfile
+        f.attrs['pairsfile'] = pairsfile
+        f.attrs['flavor'] = (
+            'minimal_caldet'
+            if 'minimal' in f"{tauhistfile} {pairsfile}".lower()
+            else 'legacy'
+        )
         for group_name, stats in [('stats_trap', CCDTest.stats_trap), ('stats_notrap', CCDTest.stats_notrap)]:
             grp = f.create_group(group_name)
             for combo_name, d in stats.items():

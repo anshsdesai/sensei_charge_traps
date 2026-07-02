@@ -8,16 +8,22 @@ priority order, so the campaign can be interrupted at any point and the most
 important results exist first. Completed scenarios (output dir already holds
 num_runs HDF5 files) are skipped, so the script is resumable.
 
-The baseline trap population is the characterized-trap count (the tau-histogram
-integral). For the upper-limit population the trap density is scaled by
-hist_upper.sum() / hist_baseline.sum() (the efficiency-corrected population
-estimate divided by the baseline characterized count), since the upper-limit
-histogram encodes the total population per CCD, not just the tau shape.
+Each population variant passes its OWN tau histogram, whose integral the worker
+seeds n_detected_traps from (it places n_detected_traps * trap_density_scale
+traps). So the density scale is 1.0 for every population -- the histogram itself
+already encodes the population count (baseline = characterized count;
+upper-limit = 90% CL inflated count; efficiency-corrected = completeness point
+estimate). --upper-density-scale remains a manual systematic override only.
+
+The --effcorr campaign additionally runs the efficiency-corrected point estimate
+with --zero-exp-dep (single-e dark current zeroed) to test whether traps alone
+can reproduce the observed exposure-dependent single-e rate.
 
 Usage:
     python run_campaign.py                 # central V_p only, 200 trials each
     python run_campaign.py --vp-scan       # also sweep the V_p systematic band
     python run_campaign.py --only minos_baseline   # filter by label substring
+    python run_campaign.py --effcorr --zero-exp-dep   # trap-only effcorr campaign
     python run_campaign.py --list          # show the scenario table and exit
 """
 import argparse
@@ -59,22 +65,23 @@ CLEAR_LABELS = {
 EXPECTED_TRAP_TRANSPORT_MODEL = 'phase_limited_v1v3'
 
 
-def build_scenarios(upper=True, vp_values=VP_ORDER):
+def build_scenarios(populations=('baseline', 'upper'), vp_values=VP_ORDER):
     """Priority-ordered scenario list with V_p (packet volume) as the outermost
     axis: the central V_p (all four headline science scenarios) first, then the
-    systematic band if requested. Within each V_p, baseline population before
-    upper limit and MINOS before SNOLAB. The clear mode is swept innermost (in
-    the caller), so every clear runs for a given V_p before the next V_p starts.
+    systematic band if requested. Within each V_p, populations are run in the
+    order given (`baseline` before `upper`; or `effcorr` alone) and MINOS before
+    SNOLAB. The clear mode is swept innermost (in the caller), so every clear runs
+    for a given V_p before the next V_p starts.
 
-    `vp_values` defaults to the full systematic band; pass `(VP_BASELINE,)` to
-    run only the central packet volume (the headline configuration)."""
+    `populations` is the ordered tuple of population variants to run
+    ('baseline', 'upper', 'effcorr'). `vp_values` defaults to the full systematic
+    band; pass `(VP_BASELINE,)` to run only the central packet volume."""
     scenarios = []
     # Central V_p first, then the systematic band low->high.
-    hists = ('baseline', 'upper') if upper else ('baseline',)
     for vp in vp_values:
-        for hist in hists:
+        for population in populations:
             for cond in ('minos', 'snolab'):
-                scenarios.append((cond, hist, vp))
+                scenarios.append((cond, population, vp))
     return scenarios
 
 
@@ -90,8 +97,14 @@ def label_for(
     exposure_order='shuffled',
     flavor='legacy',
     binning=BINNING_BASELINE,
+    zero_exp_dep=False,
 ):
-    pop = 'upper' if 'upper' in histfile else 'baseline'
+    if 'efficiency_corrected' in histfile:
+        pop = 'effcorr'
+    elif 'upper' in histfile:
+        pop = 'upper'
+    else:
+        pop = 'baseline'
     mode = 'expind_post' if exp_indep_charge_mode == 'post_readout' else 'expind_pre'
     clear = CLEAR_LABELS[clear_mode]
     order = EXPOSURE_ORDER_LABELS[exposure_order]
@@ -99,7 +112,10 @@ def label_for(
     # Unbinned runs keep their original label (no suffix) so previously completed
     # output dirs are still recognized as complete.
     bin_tag = '' if binning == BINNING_BASELINE else f'_bin{binning:g}'
-    return f"{cond}_{pop}_vp{vp:g}_{mode}_{clear}_{order}{bin_tag}{flavor_tag}".replace('.', 'p')
+    # Zero-dark-current (trap-only) runs get a _zedr tag so they never collide
+    # with future dark-current-on effcorr runs.
+    zedr_tag = '_zedr' if zero_exp_dep else ''
+    return f"{cond}_{pop}_vp{vp:g}_{mode}_{clear}_{order}{bin_tag}{zedr_tag}{flavor_tag}".replace('.', 'p')
 
 
 def exposure_orders_for(vp, policy):
@@ -137,7 +153,7 @@ def _decode_h5_attr(value):
     return value
 
 
-def count_compatible_runs(outdir, phase_capture_ticks):
+def count_compatible_runs(outdir, phase_capture_ticks, v3_phase_fraction):
     """Count existing HDF5 outputs compatible with the active transport model."""
     compatible = 0
     incompatible = []
@@ -146,6 +162,8 @@ def count_compatible_runs(outdir, phase_capture_ticks):
             with h5py.File(filename, 'r') as f:
                 model = _decode_h5_attr(f.attrs.get('trap_transport_model', ''))
                 ticks = f.attrs.get('phase_capture_ticks', np.nan)
+                # Pre-phase-split files lack the attr -> NaN -> incompatible.
+                v3_frac = f.attrs.get('v3_phase_fraction', np.nan)
         except OSError as exc:
             incompatible.append((filename, f'unreadable HDF5: {exc}'))
             continue
@@ -153,13 +171,22 @@ def count_compatible_runs(outdir, phase_capture_ticks):
             ticks = float(ticks)
         except (TypeError, ValueError):
             ticks = np.nan
+        try:
+            v3_frac = float(v3_frac)
+        except (TypeError, ValueError):
+            v3_frac = np.nan
         if (
             model == EXPECTED_TRAP_TRANSPORT_MODEL
             and np.isclose(ticks, phase_capture_ticks, rtol=0.0, atol=1.0e-12)
+            and np.isclose(v3_frac, v3_phase_fraction, rtol=0.0, atol=1.0e-12)
         ):
             compatible += 1
         else:
-            incompatible.append((filename, f'model={model!r}, phase_capture_ticks={ticks!r}'))
+            incompatible.append((
+                filename,
+                f'model={model!r}, phase_capture_ticks={ticks!r}, '
+                f'v3_phase_fraction={v3_frac!r}',
+            ))
     return compatible, incompatible
 
 
@@ -185,14 +212,32 @@ def main():
                              "per-file idempotency in run_ccd_simulation handles resume, so "
                              "each HTCondor job can own a disjoint chunk of a scenario's trials.")
     parser.add_argument('--skip_upper', action='store_true',help='If set will skip the upper limit scenario.')
+    parser.add_argument('--effcorr', action='store_true',
+                        help="Shorthand for --populations effcorr: run ONLY the "
+                             "efficiency-corrected (completeness point-estimate) "
+                             "population. Pair with --zero-exp-dep for the trap-only "
+                             "test. Overridden by --populations.")
+    parser.add_argument('--populations', nargs='+',
+                        choices=['baseline', 'upper', 'effcorr'], default=None,
+                        help="Explicit ordered list of trap populations to run "
+                             "(overrides --effcorr/--skip_upper). The trap-only "
+                             "bracket campaign uses '--populations effcorr upper': "
+                             "effcorr is the MLE point estimate (empty tau bins "
+                             "zeroed, lower edge) and upper fills empty bins at 90%% "
+                             "CL (upper edge).")
+    parser.add_argument('--zero-exp-dep', action='store_true',
+                        help="Pass --zero-exp-dep-rate to the simulation (zero the "
+                             "single-electron dark current). Tags output dirs with "
+                             "_zedr.")
     parser.add_argument('--out_base', type=str, default='campaign')
     parser.add_argument('--only', type=str, default=None,
                         help="Only run scenarios whose label contains this substring.")
     parser.add_argument('--upper-density-scale', type=float, default=None,
-                        help="Override the trap-density scale for upper-limit runs "
-                             "(default: hist_upper.sum()/hist_baseline.sum(), the "
-                             "upper-limit population over the baseline characterized "
-                             "count).")
+                        help="Manual override for the upper-limit trap-density scale. "
+                             "Default 1.0: the upper histogram's integral already IS "
+                             "the upper-limit count (the worker seeds n_detected_traps "
+                             "from it), so no extra scaling is applied. Set this only "
+                             "as a deliberate systematic.")
     parser.add_argument(
         '--exp-indep-charge-mode',
         choices=['pre_readout', 'post_readout'],
@@ -225,6 +270,15 @@ def main():
         help="Effective V1/V3 phase-overlap capture window in 15 MHz sequencer ticks.",
     )
     parser.add_argument(
+        '--v3-phase-fraction',
+        type=float,
+        default=0.5,
+        help="Forwarded to run_ccd_simulation: fraction of traps on the V3 "
+             "clock phase (same-step self-recapture of their own emission); "
+             "V1 traps' emission always escapes. 1.0 reproduces the "
+             "pre-2026-07 all-V3 kernel for A/B comparison.",
+    )
+    parser.add_argument(
         '--binning-factors',
         nargs='+',
         type=float,
@@ -248,7 +302,19 @@ def main():
     )
     parser.add_argument('--list', action='store_true', help="Print scenarios and exit.")
     args = parser.parse_args()
-    upper = not args.skip_upper
+    if args.populations:
+        populations = tuple(args.populations)
+        if args.effcorr or args.skip_upper:
+            print("Note: --effcorr/--skip_upper are ignored when --populations is given.")
+    elif args.effcorr:
+        populations = ('effcorr',)
+        if args.skip_upper:
+            print("Note: --skip_upper is ignored under --effcorr "
+                  "(effcorr runs the efficiency-corrected population only).")
+    elif args.skip_upper:
+        populations = ('baseline',)
+    else:
+        populations = ('baseline', 'upper')
     vp_values = VP_ORDER if args.vp_scan else (VP_BASELINE,)
     # Chunked (HTCondor) mode: --run-offset given (even 0). Each job owns a
     # disjoint trial range; the campaign-level completeness skip is disabled and
@@ -267,26 +333,32 @@ def main():
     print(f"Baseline trap count ({args.flavor}): {n_baseline_traps} characterized "
           f"traps from {baseline_hist}.")
 
-    if upper:
-        upper_hist = f'tau_at_135k_hist{hist_suffix}_upper_limit.npz'
-        # The upper histogram's integral IS the upper-limit trap count, and the
-        # worker seeds n_detected_traps from the histfile integral (it places
-        # n_detected_traps * trap_density_scale traps). So the density scale must
-        # be 1.0 -- multiplying by sum(upper)/baseline here double-counts and
-        # placed ~4.6x too many traps. --upper-density-scale stays as a manual
-        # systematic override only.
-        upper_scale = 1.0 if args.upper_density_scale is None else args.upper_density_scale
+    # The upper histogram's integral IS the upper-limit trap count, and the
+    # worker seeds n_detected_traps from the histfile integral (it places
+    # n_detected_traps * trap_density_scale traps). So the density scale is 1.0
+    # for every population -- multiplying by sum(upper)/baseline double-counts and
+    # placed ~4.6x too many traps. --upper-density-scale stays a manual override.
+    upper_scale = 1.0 if args.upper_density_scale is None else args.upper_density_scale
+    upper_hist = f'tau_at_135k_hist{hist_suffix}_upper_limit.npz'
+    effcorr_hist = f'tau_at_135k_hist{hist_suffix}_efficiency_corrected.npz'
+    # Explicit population -> seed-histogram map (do NOT route by 'upper' substring;
+    # that silently sent 'effcorr' to the baseline catalog).
+    POP_HIST = {
+        'baseline': baseline_hist,
+        'upper': upper_hist,
+        'effcorr': effcorr_hist,
+    }
+    POP_SCALE = {'baseline': 1.0, 'upper': upper_scale, 'effcorr': 1.0}
     # The (tau135, sigma) pairs are refit from the same per-trap selection as the
     # histogram, so they must track the flavor too; otherwise the sim mixes (e.g.)
     # the minimal tau histogram with the legacy cross-section pairs.
     pairs_file = f'trap_tau135_sigma_pairs{hist_suffix}.npz'
 
-    
-
-    scenarios = build_scenarios(upper=upper, vp_values=vp_values)
+    scenarios = build_scenarios(populations=populations, vp_values=vp_values)
     todo = []
-    for cond, histfile, vp in scenarios:
-        histfile = upper_hist if 'upper' in histfile else baseline_hist
+    for cond, population, vp in scenarios:
+        histfile = POP_HIST[population]
+        scale = POP_SCALE[population]
         for clear_mode in args.clear_modes:
             for exposure_order in exposure_orders_for(vp, args.exposure_order_policy):
                 for binning in binnings_for(clear_mode, vp, exposure_order, args.binning_factors):
@@ -299,6 +371,7 @@ def main():
                         exposure_order,
                         args.flavor,
                         binning,
+                        args.zero_exp_dep,
                     )
                     if args.only and args.only not in label:
                         continue
@@ -306,8 +379,8 @@ def main():
                     n_done, incompatible = count_compatible_runs(
                         outdir,
                         args.phase_capture_ticks,
+                        args.v3_phase_fraction,
                     )
-                    scale = upper_scale if 'upper' in histfile else 1.0
                     todo.append(
                         (label, cond, histfile, vp, scale, outdir, n_done,
                          incompatible, clear_mode, exposure_order, binning)
@@ -325,8 +398,9 @@ def main():
             print(
                 f"\n!!! {label}: {len(incompatible)} existing HDF5 files have "
                 f"incompatible trap transport metadata for model "
-                f"{EXPECTED_TRAP_TRANSPORT_MODEL!r} and phase_capture_ticks="
-                f"{args.phase_capture_ticks:g}. Use a new --out_base or "
+                f"{EXPECTED_TRAP_TRANSPORT_MODEL!r}, phase_capture_ticks="
+                f"{args.phase_capture_ticks:g} and v3_phase_fraction="
+                f"{args.v3_phase_fraction:g}. Use a new --out_base or "
                 "delete/regenerate the incompatible files."
             )
             for filename, reason in incompatible[:5]:
@@ -347,12 +421,15 @@ def main():
             '--packet-volume-um3', str(vp),
             '--binning', str(binning),
             '--phase-capture-ticks', str(args.phase_capture_ticks),
+            '--v3-phase-fraction', str(args.v3_phase_fraction),
             '--trap-density-scale', str(scale),
             '--exp-indep-charge-mode', args.exp_indep_charge_mode,
             '--clear-mode', clear_mode,
             '--exposure-order', exposure_order,
             '--out', outdir,
         ]
+        if args.zero_exp_dep:
+            cmd += ['--zero-exp-dep-rate']
         if args.num_workers is not None:
             cmd += ['--num_workers', str(args.num_workers)]
         print(f"\n=== {label} ===\n{' '.join(cmd)}")

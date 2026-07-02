@@ -14,8 +14,14 @@ import argparse
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description="Run parallel CCD charge trap simulations.")
-    parser.add_argument('--num_runs', type=int, default=500, help="Number of simulation trials to run.")
+    parser.add_argument('--num_runs', type=int, default=200, help="Number of simulation trials to run.")
     parser.add_argument('--num_workers', type=int, default=None, help="Number of CPU workers (defaults to half the cores; each worker holds ~2.3 GB, so cores-1 can exhaust RAM).")
+    parser.add_argument('--run-offset', type=int, default=0,
+                        help="Starting trial index (default 0). Trials run for r in "
+                             "[run_offset, run_offset+num_runs); each writes "
+                             "ccd_traps_run{r}.h5 and seeds the PRNG from r, so disjoint "
+                             "offsets produce disjoint, non-colliding trials. Used to split "
+                             "one scenario's trials across many short HTCondor jobs.")
     parser.add_argument('--runconditions', type=str, default='minos', choices=['minos', 'snolab'], help="Run conditions configuration to use.")
     parser.add_argument('--binning', type=float, default=1.0, help="Scale factor to divide pixel readout times (simulates binning).")
     parser.add_argument('--out', type=str, default='./', help="Output directory.")
@@ -27,10 +33,72 @@ if __name__ == '__main__':
                              "Default 3 um^3: collecting-phase area (~12x5-10 um^2) x thermal vertical spread in the buried channel (~0.02-0.07 um). "
                              "Vary by ~a decade each way as a systematic.")
     parser.add_argument(
+        '--phase-capture-ticks',
+        type=float,
+        default=300.0,
+        help="Effective V1/V3 phase-overlap capture window in 15 MHz sequencer ticks. "
+             "Default 300 ticks = one V1/V3 hold in temp_scan_run1_imgseq.xml.",
+    )
+    parser.add_argument(
         '--trap-density-scale',
         type=float,
         default=1.0,
-        help="Multiplier applied to the baseline density of 5171 traps per full CCD.",
+        help="Multiplier applied to the baseline characterized-trap population per "
+             "full CCD (the upper-limit run scales this up).",
+    )
+    parser.add_argument(
+        '--exp-indep-charge-mode',
+        choices=['pre_readout', 'post_readout'],
+        default='pre_readout',
+        help="Place exposure-independent single-electron charge before active-area "
+             "trap transport (default; charge can be trapped) or after it "
+             "(readout-generated model; not trappable).",
+    )
+    parser.add_argument(
+        '--clear-mode',
+        choices=['instantaneous', 'sequencer', 'three_hour', 'binned_0h'],
+        default='sequencer',
+        help="Clear free surface charge instantaneously (legacy), transport it "
+             "through the temp_scan_run1_clearseq.xml clock sequence ('sequencer'), "
+             "run that sequence continuously for 3 hours ('three_hour'), or use no "
+             "clear at all and instead take a binned 0 h image after every real "
+             "exposure ('binned_0h') to reset the array.",
+    )
+    parser.add_argument(
+        '--binning-0h-factor',
+        type=float,
+        default=32.0,
+        help="Row-binning factor for the 0 h images in clear-mode 'binned_0h'. "
+             "Binning shortens the readout, so the per-row trap dwell for those "
+             "images is tpix_vertical / binning_0h_factor (default 32).",
+    )
+    parser.add_argument(
+        '--exposure-order',
+        choices=['shuffled', 'ordered'],
+        default='shuffled',
+        help="Order of the per-trial exposure sequence: 'shuffled' (default) "
+             "permutes all images to decouple each exposure from its predecessor; "
+             "'ordered' uses the old fixed 0->4->6->10->20 cycle (in binned_0h "
+             "mode, the fixed 4->6->10->20 real-exposure cycle).",
+    )
+    parser.add_argument(
+        '--v3-phase-fraction',
+        type=float,
+        default=0.5,
+        help="Fraction of traps assigned to the V3 clock phase (Bernoulli per "
+             "trap). A V3 trap's readout/clear emission faces a same-step "
+             "recapture roll (packet crosses the trap on row exit); a V1 "
+             "trap's emission always escapes (packet crossed on entry). "
+             "Default 0.5; 1.0 reproduces the pre-2026-07 all-V3 kernel for "
+             "A/B comparison.",
+    )
+    parser.add_argument(
+        '--zero-exp-dep-rate',
+        action='store_true',
+        help="Zero the injected single-electron dark current (exp_dep_rate=0) so "
+             "trap emission is the only exposure-dependent single-e source. "
+             "High-energy cosmic events and exposure-independent spurious charge "
+             "are unaffected (trap-only hypothesis test).",
     )
     args = parser.parse_args()
 
@@ -81,6 +149,19 @@ if __name__ == '__main__':
         print(f"Error: {args.pairsfile} not found. Please run make_trap_pairs.py first to generate this file.")
         sys.exit(1)
 
+    # Baseline trap population = the number of *characterized* traps, i.e. the
+    # integral of the tau histogram (each entry is one characterized trap). This
+    # replaces the raw detected-dipole count: detection is a poor false-positive
+    # filter (random/horizontal-null decoys reach "well-behaved" at 20-50%),
+    # whereas characterization rejects ~97-99% of decoys, so the characterized
+    # count is the FP-clean population for which the sampled (tau, sigma) are
+    # actually validated. Detection/characterization incompleteness (real traps
+    # that failed the fit) is bracketed by the upper-limit population variant,
+    # not the baseline.
+    n_baseline_traps = int(round(float(np.sum(tau_weights))))
+    print(f"Baseline trap count: {n_baseline_traps} characterized traps "
+          f"(tau-histogram integral of {fname}).")
+
     num_runs = args.num_runs
     # Each worker holds its own CCD instance (~2.3 GB private memory), so the
     # default uses half the cores rather than cores-1 to stay within RAM.
@@ -90,7 +171,15 @@ if __name__ == '__main__':
     print(
         f"Conditions: {args.runconditions}, trap density scale: {args.trap_density_scale:g}, "
         f"packet volume: {args.packet_volume_um3:g} um^3, "
-        f"tpix: {tpix:.3e} s, tpix_vertical: {tpix_vertical:.3e} s"
+        f"transport: {TRAP_TRANSPORT_MODEL}, "
+        f"phase capture: {args.phase_capture_ticks:g} ticks ({args.phase_capture_ticks / 15e6:.3e} s), "
+        f"V3 phase fraction: {args.v3_phase_fraction:g}, "
+        f"exposure-independent charge: {args.exp_indep_charge_mode}, "
+        f"clear: {args.clear_mode}, "
+        + (f"readout binning: {args.binning:g}x, " if args.binning != 1.0 else "")
+        + (f"0h binning: {args.binning_0h_factor:g}x, " if args.clear_mode == 'binned_0h' else "")
+        + f"exposure order: {args.exposure_order}, "
+        + f"tpix: {tpix:.3e} s, tpix_vertical: {tpix_vertical:.3e} s"
     )
 
     with ProcessPoolExecutor(max_workers=num_workers) as executor:
@@ -99,7 +188,7 @@ if __name__ == '__main__':
         results = list(tqdm(
             executor.map(
                 run_single_trial,
-                range(num_runs),                     # r (changes 0 to num_runs-1)
+                range(args.run_offset, args.run_offset + num_runs),  # r (run_offset .. run_offset+num_runs-1)
                 itertools.repeat(tpix),              # tpix (constant)
                 itertools.repeat(tpix_vertical),     # tpix_vertical (constant)
                 itertools.repeat(tau_weights),       # tau_weights (constant)
@@ -110,6 +199,17 @@ if __name__ == '__main__':
                 itertools.repeat(args.out),          # output directory (constant)
                 itertools.repeat(args.trap_density_scale), # trap density multiplier (constant)
                 itertools.repeat(args.packet_volume_um3),  # single-carrier packet volume (constant)
+                itertools.repeat(args.phase_capture_ticks),    # V1/V3 phase-overlap capture window
+                itertools.repeat(args.exp_indep_charge_mode), # pre/post active-area readout
+                itertools.repeat(args.clear_mode),         # instantaneous/sequencer/three_hour/binned_0h
+                itertools.repeat(args.binning_0h_factor),  # 0h row-binning factor (binned_0h mode)
+                itertools.repeat(args.exposure_order),     # shuffled/ordered exposure sequence
+                itertools.repeat(n_baseline_traps),        # baseline characterized-trap count
+                itertools.repeat(fname),                   # tau histogram file (provenance)
+                itertools.repeat(args.pairsfile),          # (tau, sigma) pairs file (provenance)
+                itertools.repeat(args.binning),            # global readout binning factor (provenance)
+                itertools.repeat(args.zero_exp_dep_rate),  # zero single-e dark current (trap-only test)
+                itertools.repeat(args.v3_phase_fraction),  # V1/V3 clock-phase split (1.0 = old all-V3 kernel)
             ),
             total=num_runs,
             desc="Running Trials"

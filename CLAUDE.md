@@ -35,9 +35,10 @@ No test suite, no linter configured. Notebooks ([charge_trap_analysis.ipynb](cha
 ## Architecture notes
 
 **Before touching trap physics** (`fast_readout_numba`, `charge_trap_interaction`,
-`log_energy_cross_section`) read [TRAP_SIMULATION_PHYSICS.md](TRAP_SIMULATION_PHYSICS.md) —
-it records the verified SRH model, the recapture requirement, the V_p/σ systematics,
-the constants-fix history, and all confirmed operating-condition decisions.
+`log_energy_cross_section`) read [notebook/physics.md](notebook/physics.md) (start at
+[INDEX.md](INDEX.md)) — it records the SRH model, the three successive recapture models (the current
+one is `phase_limited_v1v3`), the V_p/σ systematics, the constants-fix history, the instrumented
+deviation budget, and all confirmed operating-condition decisions.
 
 ### Cached-stage pattern
 Both [run_charge_traps.py](run_charge_traps.py) and the notebooks follow a `try: load cache; except FileNotFoundError: compute and save` pattern at every expensive stage. Key caches, in order of the pipeline:
@@ -60,6 +61,21 @@ Both [run_charge_traps.py](run_charge_traps.py) and the notebooks follow a `try:
 - `process_run` (~line 1072) derives single-electron counts and applies `findBadCells` masking to produce `single_e_counts_masked*` arrays — these are what downstream plotting consumes.
 - Parallelism uses `ProcessPoolExecutor` with `itertools.repeat` to avoid copying `tau_weights`/`tau_edges` per task. Each worker re-seeds Numba's PRNG from `os.getpid() + r*10000` — do **not** remove `seed_numba(...)` in `run_single_trial` or all workers will produce identical traps.
 - `binning` in [run_ccd_simulation.py](run_ccd_simulation.py) scales `tpix`/`tpix_vertical` (not the image shape) — it models faster readout due to on-chip binning.
+- `exp_indep_charge_mode` (`--exp-indep-charge-mode`) controls where exposure-independent ("spurious") single-e charge is injected: `pre_readout` (**default**) injects it into the active area before readout, so it traverses the SRH traps and **can be captured**; `post_readout` adds a shared realization after readout to both the trap and no-trap images, so it does not see active-area traps (preserves the common-random-number cancellation between the two branches but makes spurious charge un-trappable).
+- `v3_phase_fraction` (`--v3-phase-fraction`, HDF5 `v3_phase_fraction` attr, default 0.5) — per-trap Bernoulli clock-phase split (added 2026-07-02). A **V3** trap is crossed by the packet on row *exit*: its dwell emission faces a same-step recapture roll (`1−e^{−q·α}`), and in the `three_hour` drain its escape is thinned by `e^{−α}`. A **V1** trap is crossed on row *entry*: capture is checked on the arriving packet *before* the emission roll, and an emitted carrier always escapes (it exits over V3, never recrossing the trap). `1.0` reproduces the pre-split all-V3 kernel for A/B comparison; pre-split HDF5 files lack the attr and are rejected by the per-file idempotency guard.
+
+### Clear modes
+`clear_mode` (`--clear-mode`, persisted to the HDF5 `clear_mode` attr) selects the per-image reset run at the top of `take_fake_image` via `CCD.simulate_clear`. All modes retain trap occupancy across images; they differ in how free surface charge is handled and how much extra SRH trap interaction the reset adds:
+- `instantaneous` (legacy) — no transport; just zeroes free surface charge.
+- `sequencer` (**default**) — transports the resident image charge out through the real `temp_scan_run1_clearseq.xml` recipe (1500 fast + 10 slow vertical shifts; per-shift dwells built from the 15 MHz sequencer ticks) running full SRH per row transit (`fast_clear_numba`), then zeroes the free charge.
+- `three_hour` — the `sequencer` transport (flushes the image) followed by an analytic continuous-fast-shift drain for 3 h over `N = round(3 h / clear_fast_dwell_s) ≈ 14.7 M` fast shifts (`drain_traps_empty_numba`, `clear_three_hour_fast_shifts`). Once the image is flushed every packet is empty, so a free trap cannot capture; occupied **V1** traps drain recapture-free, `1−exp(−T/τ)`, while **V3** traps drain recapture-thinned, `1−exp(−T·e^{−α}/τ)` — each V3 emission joins the passing packet and faces the same-gate recapture roll on exit, independent of shift speed. Models the long-clear data-taking strategy.
+- `binned_0h` — **no clear at all** (`simulate_clear` is a no-op). The schedule drops the nominal 0 h slot; instead a binned 0 h image is taken after every real exposure (`[4, 6, 10, 20] h`, 1:1 interleave → 800 images/run, 400 of them 0 h). The binned 0 h readout uses a shorter per-row dwell `tpix_vertical / binning_0h_factor` (`--binning-0h-factor`, default 32 — distinct from the global `--binning`), so it clocks faster, resets the array in place of the clear, and serves as the 0 h baseline; charge can still be trapped during that readout. `binning_0h_factor` is saved to HDF5.
+
+### Exposure order
+`exposure_order` (`--exposure-order`, HDF5 `exposure_order` attr) controls the per-trial image sequence built in `run_single_trial`: `shuffled` (**default**) permutes the whole 100-cycle schedule with a per-trial-seeded `default_rng(r)` so each exposure's trap background is decoupled from its predecessor (~1/N); `ordered` reproduces the old fixed `0→4→6→10→20` cycle (in `binned_0h`, the fixed `4→6→10→20` real-exposure cycle), under which every 0 h image followed a 20 h image and the 0 h trap excess was biased high. Use `ordered` only to reproduce/compare against that old behaviour.
+
+### Campaign axes
+[run_campaign.py](run_campaign.py) sweeps, from outermost to innermost: **V_p** (`VP_ORDER` = central 3 first, then 1, 10) → population (baseline, upper) → condition (minos, snolab) → **clear mode** (`--clear-modes`, default `sequencer three_hour binned_0h`; labels `clearseq` / `clear3h` / `bin0h`) → **exposure order** (`--exposure-order-policy`: `headline` default adds the `ordered` variant only at the central V_p, `all` everywhere, `none` shuffled-only; labels `shuf` / `ord`). Each combination gets its own labelled output dir and is skipped if already complete (resumable). The default policy yields 48 scenarios (12 of them at the central V_p run both exposure orders), each with `--num_runs` trials (default 200 — run-to-run CV on the masked excess is ~8%, so 200 gives sub-1% SEM on the mean; raise for tighter headline numbers).
 
 ### Dipole fitting ([dipole.py](dipole.py))
 - `findDipoles2` → histogram-threshold dipole finder over an electronized image.
