@@ -17,11 +17,14 @@ TOTAL=${TOTAL:-200}                       # trials per scenario
 CHUNK=${CHUNK:-10}                        # trials per Condor job (~CHUNK*6 min)
 MODES=${MODES:-"pre_readout post_readout"}
 FLAVOR=${FLAVOR:-minimal_caldet}
+BINNING=${BINNING:-32}                     # readout-binning factor; adds _bin32 variants
+                                           # (must match run_one_effcorr.sh's --binning-factors)
 
 : > joblist_effcorr.txt
 for mode in $MODES; do
   python run_campaign.py --flavor "$FLAVOR" --populations effcorr upper --zero-exp-dep \
       --clear-modes sequencer three_hour --exposure-order-policy all --vp-scan \
+      --binning-factors "$BINNING" \
       --exp-indep-charge-mode "$mode" --list \
     | awk '/^(minos|snolab)_/{print $1}' \
     | while read -r label; do
@@ -33,4 +36,4 @@ for mode in $MODES; do
       done
 done
 
-echo "Wrote $(wc -l < joblist_effcorr.txt) jobs to joblist_effcorr.txt (TOTAL=$TOTAL, CHUNK=$CHUNK, modes: $MODES)."
+echo "Wrote $(wc -l < joblist_effcorr.txt) jobs to joblist_effcorr.txt (TOTAL=$TOTAL, CHUNK=$CHUNK, modes: $MODES, binning: $BINNING)."

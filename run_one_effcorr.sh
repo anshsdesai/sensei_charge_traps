@@ -35,6 +35,7 @@ exec python run_campaign.py \
     --clear-modes sequencer three_hour \
     --exposure-order-policy all \
     --vp-scan \
+    --binning-factors 32 \
     --exp-indep-charge-mode "$2" \
     --only "$1" \
     --run-offset "$3" \

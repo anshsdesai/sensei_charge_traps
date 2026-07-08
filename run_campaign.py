@@ -132,17 +132,25 @@ def exposure_orders_for(vp, policy):
 def binnings_for(clear_mode, vp, exposure_order, factors):
     """Readout-binning factors to run for a given clear mode / V_p / exposure
     order. Always runs unbinned (factor 1.0); binned variants from
-    --binning-factors are added only for the sequencer and three_hour clears at
-    the central V_p in the science-default 'shuffled' order -- the configurations
-    the real binned (32x1 superpixel) data was taken in, and the ones where the
-    trap effect has the statistics to resolve a binning shift. (The legacy
-    'ordered' cycle is a diagnostic, so it is left unbinned to avoid doubling the
-    expensive binned runs.) Binning only divides the per-row readout dwell
-    (tpix/tpix_vertical); under the phase-limited V1/V3 transport model this
-    shortens the emission window while leaving the fixed V1/V3 capture window
-    (phase_capture_ticks) unchanged."""
+    --binning-factors are added for the sequencer and three_hour clears at every
+    V_p in the enumeration, in the science-default 'shuffled' order -- the
+    configurations the real binned (32x1 superpixel) data was taken in, and the
+    ones where the trap effect has the statistics to resolve a binning shift.
+    (The legacy 'ordered' cycle is a diagnostic, so it is left unbinned to avoid
+    doubling the expensive binned runs.)
+
+    Binned variants are emitted at every V_p (not just the central one) so the
+    V_p systematic band under --vp-scan brackets the binned result on both edges
+    (vp1 and vp10 as well as vp3). This matters under the phase_limited_v1v3
+    transport model, where single-e capture no longer saturates, so the result
+    does depend on V_p (unlike the old full-row model, where V_p barely moved
+    anything and binned was run only at vp3). Binning only divides the per-row
+    readout dwell (tpix/tpix_vertical), shortening the emission window while
+    leaving the fixed V1/V3 capture window (phase_capture_ticks) unchanged.
+    Without --vp-scan the enumeration is vp3-only, so the default headline
+    campaign is unchanged."""
     out = [BINNING_BASELINE]
-    if clear_mode in ('sequencer', 'three_hour') and vp == VP_BASELINE and exposure_order == 'shuffled':
+    if clear_mode in ('sequencer', 'three_hour') and exposure_order == 'shuffled':
         out += [f for f in factors if f != BINNING_BASELINE]
     return out
 
