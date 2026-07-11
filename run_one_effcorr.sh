@@ -26,7 +26,7 @@ source "$HOME/miniforge3/etc/profile.d/conda.sh"
 conda activate sensei_charge_traps
 cd "$REPO"
 
-# --vp-scan always passed so the V_p band (vp1/vp10) is part of the enumeration
+# --vp-scan always passed so the V_p band (vp3/vp10) is part of the enumeration
 # universe; --only selects the single scenario this job owns.
 exec python run_campaign.py \
     --flavor minimal_caldet \

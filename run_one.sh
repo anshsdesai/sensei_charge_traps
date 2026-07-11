@@ -17,9 +17,9 @@ source "$HOME/miniforge3/etc/profile.d/conda.sh"
 conda activate sensei_charge_traps
 cd "$REPO"
 
-# --vp-scan is always passed so the V_p band scenarios (vp1/vp10) are part of
+# --vp-scan is always passed so the V_p band scenarios (vp3/vp10) are part of
 # the enumeration universe; --only still selects the single scenario this job
-# owns, so headline vp3 jobs are unaffected. Whether band jobs actually get
+# owns, so headline vp1 jobs are unaffected. Whether band jobs actually get
 # queued is controlled by make_joblist.sh (VP_SCAN=1).
 exec python run_campaign.py \
     --flavor minimal_caldet \

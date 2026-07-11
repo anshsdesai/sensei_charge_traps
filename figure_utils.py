@@ -1662,8 +1662,8 @@ def scenario_dir(condition, population='baseline', vp=3.0, clear='sequencer',
     ``binning`` is the readout-binning factor (run_campaign --binning-factors).
     The default 1.0 is the unbinned run (no label suffix); a non-default value
     (e.g. 32) appends the ``_bin32`` tag, resolving the binned variants the
-    campaign only emits for the standard sequencer clear at the central V_p in
-    shuffled order (see run_campaign.binnings_for).
+    campaign emits for the sequencer and three_hour clears at every V_p, in
+    both exposure orders (see run_campaign.order_binning_pairs_for).
     """
     # The histfile string is only a token carrier for label_for's population
     # detection (it keys on the 'efficiency_corrected'/'upper' substrings); the

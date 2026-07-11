@@ -6,9 +6,9 @@
 # matches the real scenario enumeration (no hand-maintained list to drift).
 #
 # Override defaults via env, e.g.:  TOTAL=100 CHUNK=5 bash make_joblist.sh
-# Set VP_SCAN=1 to also queue the V_p systematic band (vp1, vp10) — adds 48
+# Set VP_SCAN=1 to also queue the V_p systematic band (vp3, vp10) — adds 48
 # scenarios (24 per mode). run_one.sh always passes --vp-scan, so these jobs
-# run correctly. Default (unset) queues only the central V_p=3 headline set.
+# run correctly. Default (unset) queues only the central V_p=1 headline set.
 set -euo pipefail
 
 REPO=/export/home/adesai/Projects/sensei_charge_traps
