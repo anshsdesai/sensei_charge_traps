@@ -22,6 +22,16 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from dipole import constant_fit_r2, intensity_function
+from dipole_new import (
+    INTENSITY_SHAPE_PEAK,
+    INTENSITY_SHAPE_PEAK_X,
+    intensity_function as intensity_function_minimal,
+    intensity_function_offset,
+)
+from trap_completeness_method3.src.analysis_flavors import (
+    get_analysis_flavor,
+    load_delta_chi2_thresholds,
+)
 
 
 STAGE_ID = "06_single_curve_recovery"
@@ -206,9 +216,12 @@ def _fit_one_curve(
     intensities: np.ndarray,
     intensity_err: np.ndarray,
     image_sigma: float,
+    analysis_flavor: str = "legacy",
+    temperature_k: int | None = None,
+    delta_chi2_threshold_by_temperature: dict[int, float] | None = None,
+    _flavor: Any = None,
 ) -> dict[str, Any]:
-    tau_estimate = float(seconds[int(np.argmax(intensities))])
-    dtpc_estimate = float(np.max(intensities) * 8.0 / N_PUMPS / 5.2)
+    flavor = _flavor if _flavor is not None else get_analysis_flavor(analysis_flavor)
     fit: dict[str, Any] = {
         "fit_failed": False,
         "good_intensity_fit": False,
@@ -223,20 +236,44 @@ def _fit_one_curve(
         "fit_r_squared": math.nan,
         "fit_lin_r_squared": math.nan,
         "fit_const_lin_r_squared": math.nan,
+        "fit_offset": math.nan,
+        "fit_offset_err": math.nan,
+        "amplitude_significance": math.nan,
+        "delta_chi2_vs_constant": math.nan,
+        "delta_chi2_threshold": math.nan,
         "controlling_failure_cut": "",
         "failed_cuts": "",
     }
 
     failed_cuts: list[str] = []
+    if flavor.fit_offset:
+        model_fn = intensity_function_offset
+        offset_estimate = float(np.median(intensities))
+        deviations = intensities - offset_estimate
+        peak_index = int(np.argmax(np.abs(deviations)))
+        tau_estimate = float(np.clip(seconds[peak_index] / INTENSITY_SHAPE_PEAK_X, 1e-8, 1000.0))
+        coeff_estimate = float(deviations[peak_index] / (N_PUMPS * INTENSITY_SHAPE_PEAK))
+        p0 = [coeff_estimate, tau_estimate, offset_estimate]
+        bounds = ([-np.inf, 1e-8, -np.inf], [np.inf, 1000.0, np.inf])
+        absolute_sigma = flavor.errors_are_absolute
+    else:
+        model_fn = intensity_function
+        tau_estimate = float(seconds[int(np.argmax(intensities))])
+        dtpc_estimate = float(np.max(intensities) * 8.0 / N_PUMPS / 5.2)
+        p0 = [dtpc_estimate, tau_estimate]
+        bounds = ([0.0, 1e-8], [np.inf, 1000.0])
+        absolute_sigma = flavor.errors_are_absolute
+
     try:
         popt, pcov = curve_fit(
-            intensity_function,
+            model_fn,
             seconds,
             intensities,
             sigma=intensity_err,
-            p0=[dtpc_estimate, tau_estimate],
-            bounds=([0.0, 1e-8], [np.inf, 1000.0]),
-            maxfev=10000,
+            p0=p0,
+            bounds=bounds,
+            absolute_sigma=absolute_sigma,
+            maxfev=20000 if flavor.fit_offset else 10000,
         )
     except Exception as exc:
         fit["fit_failed"] = True
@@ -248,12 +285,12 @@ def _fit_one_curve(
     del const
     slope, intercept, r_value, p_lin, std_err = linregress(seconds, intensities)
     del slope, intercept, p_lin, std_err
-    residuals = intensities - intensity_function(seconds, *popt)
+    residuals = intensities - model_fn(seconds, *popt)
     chi_squared = float(np.sum((residuals / intensity_err) ** 2))
     dof = int(len(intensities) - len(popt))
     reduced_chi_squared = chi_squared / dof
     p_value = float(1.0 - chi2.cdf(chi_squared, dof))
-    ss_res = float(np.sum((intensities - intensity_function(seconds, *popt)) ** 2))
+    ss_res = float(np.sum((intensities - model_fn(seconds, *popt)) ** 2))
     ss_tot = float(np.sum((intensities - np.mean(intensities)) ** 2))
     r2 = 1.0 - (ss_res / ss_tot) if ss_tot != 0 else math.nan
     perr = np.sqrt(np.diag(pcov))
@@ -261,10 +298,37 @@ def _fit_one_curve(
 
     if not (p_value > 0.05):
         failed_cuts.append("p_value")
-    if float(np.max(intensities)) < 3.0 * float(np.mean(intensity_err)):
-        failed_cuts.append("max_intensity_lt_3_mean_intensity_err")
-    if float(np.max(intensities)) < 3.0 * image_sigma:
-        failed_cuts.append("max_intensity_lt_3_image_sigma")
+    if flavor.fit_offset:
+        amplitude_significance = float(abs(popt[0]) / perr[0]) if perr[0] > 0 else 0.0
+        if amplitude_significance < 3.0:
+            failed_cuts.append("amplitude_significance_lt_3")
+        weights = 1.0 / np.square(intensity_err)
+        const_best = float(np.sum(intensities * weights) / np.sum(weights))
+        chi2_const = float(np.sum(np.square((intensities - const_best) / intensity_err)))
+        delta_chi2 = float(chi2_const - chi_squared)
+        if delta_chi2_threshold_by_temperature is not None:
+            if temperature_k is None:
+                raise ValueError("temperature_k is required when using calibrated Delta-chi2 thresholds.")
+            delta_threshold = float(
+                delta_chi2_threshold_by_temperature.get(int(temperature_k), flavor.fixed_delta_chi2_threshold)
+            )
+        elif flavor.calibrated_detection:
+            raise ValueError(
+                "minimal_caldet requires calibrated Delta-chi2 thresholds; "
+                "pass delta_chi2_threshold_by_temperature."
+            )
+        else:
+            delta_threshold = float(flavor.fixed_delta_chi2_threshold)
+        if delta_chi2 < delta_threshold:
+            failed_cuts.append("delta_chi2_vs_constant")
+    else:
+        amplitude_significance = math.nan
+        delta_chi2 = math.nan
+        delta_threshold = math.nan
+        if float(np.max(intensities)) < 3.0 * float(np.mean(intensity_err)):
+            failed_cuts.append("max_intensity_lt_3_mean_intensity_err")
+        if float(np.max(intensities)) < 3.0 * image_sigma:
+            failed_cuts.append("max_intensity_lt_3_image_sigma")
     if tau_rel_err > 0.5:
         failed_cuts.append("tau_relative_error_gt_0p5")
 
@@ -282,6 +346,11 @@ def _fit_one_curve(
             "fit_r_squared": float(r2),
             "fit_lin_r_squared": float(r_value**2),
             "fit_const_lin_r_squared": float(const_lin_r2),
+            "fit_offset": float(popt[2]) if flavor.fit_offset else math.nan,
+            "fit_offset_err": float(perr[2]) if flavor.fit_offset else math.nan,
+            "amplitude_significance": amplitude_significance,
+            "delta_chi2_vs_constant": delta_chi2,
+            "delta_chi2_threshold": delta_threshold,
             "controlling_failure_cut": failed_cuts[0] if failed_cuts else "pass",
             "failed_cuts": ";".join(failed_cuts),
         }
@@ -332,6 +401,7 @@ def _write_csv(path: Path, rows: list[dict[str, Any]]) -> None:
         "true_tau_seconds",
         "true_amplitude_electrons",
         "true_fit_coeff",
+        "true_offset_electrons",
         "analytic_peak_time_seconds",
         "analytic_peak_intensity_electrons",
         "sampled_peak_time_seconds",
@@ -352,6 +422,11 @@ def _write_csv(path: Path, rows: list[dict[str, Any]]) -> None:
         "fit_r_squared",
         "fit_lin_r_squared",
         "fit_const_lin_r_squared",
+        "fit_offset",
+        "fit_offset_err",
+        "amplitude_significance",
+        "delta_chi2_vs_constant",
+        "delta_chi2_threshold",
         "controlling_failure_cut",
         "failed_cuts",
     ]
@@ -421,15 +496,18 @@ def run_stage(
     quadrant: int,
     realizations: int,
     seed: int,
+    analysis_flavor: str = "legacy",
 ) -> dict[str, Any]:
+    flavor = get_analysis_flavor(analysis_flavor)
     workspace = root / "trap_completeness_method3"
     cache_dir = workspace / "cache"
     cache_dir.mkdir(parents=True, exist_ok=True)
 
     produced_at = datetime.now().astimezone().isoformat(timespec="seconds")
-    output_csv = cache_dir / "06_single_curve_recovery.csv"
-    output_json = cache_dir / "06_single_curve_recovery_summary.json"
-    output_plot = cache_dir / "figures" / "06_single_curve_recovery_examples.png"
+    tag = "" if flavor.name == "legacy" else f"_{flavor.output_tag}"
+    output_csv = cache_dir / f"06_single_curve_recovery{tag}.csv"
+    output_json = cache_dir / f"06_single_curve_recovery{tag}_summary.json"
+    output_plot = cache_dir / "figures" / f"06_single_curve_recovery{tag}_examples.png"
     code_path = workspace / "src" / "single_curve_recovery.py"
 
     stage04_csv = cache_dir / "04_intensity_error_scaling.csv"
@@ -449,6 +527,7 @@ def run_stage(
     coeff = amplitude / N_PUMPS
     x_peak, shape_peak = _ideal_shape_peak()
     rng = np.random.default_rng(seed)
+    delta_chi2_threshold_by_temperature = load_delta_chi2_thresholds(flavor)
 
     rows: list[dict[str, Any]] = []
     plot_rows: dict[str, dict[str, Any]] = {}
@@ -459,13 +538,20 @@ def run_stage(
     for tau_case in _tau_cases(seconds):
         tau_label = tau_case["tau_case"]
         true_tau = float(tau_case["true_tau_seconds"])
-        true_intensity = intensity_function(seconds, coeff, true_tau)
+        true_offset = 0.0
+        true_coeff = coeff
+        if flavor.fit_offset:
+            true_coeff *= float(rng.choice([-1.0, 1.0]))
+            true_intensity = intensity_function_offset(seconds, true_coeff, true_tau, true_offset)
+        else:
+            true_intensity = intensity_function(seconds, true_coeff, true_tau)
         analytic_peak_time = x_peak * true_tau
-        analytic_peak_intensity = shape_peak * amplitude
-        sampled_peak_index = int(np.argmax(true_intensity))
+        signed_amplitude = true_coeff * N_PUMPS
+        analytic_peak_intensity = shape_peak * abs(signed_amplitude)
+        sampled_peak_index = int(np.argmax(np.abs(true_intensity)) if flavor.fit_offset else np.argmax(true_intensity))
         sampled_peak_time = float(seconds[sampled_peak_index])
-        sampled_peak_intensity = float(true_intensity[sampled_peak_index])
-        long_tau_linear = amplitude * 7.0 * seconds / true_tau
+        sampled_peak_intensity = float(abs(true_intensity[sampled_peak_index]) if flavor.fit_offset else true_intensity[sampled_peak_index])
+        long_tau_linear = signed_amplitude * 7.0 * seconds / true_tau
         linear_mask = seconds / true_tau < 0.1
         linear_fractional_error = (
             np.max(
@@ -492,7 +578,15 @@ def run_stage(
             intensity_err, used_fallback = _draw_intensity_err(rng, dtphs, noise_by_dtph)
             noise = rng.normal(0.0, intensity_err)
             noisy_intensity = true_intensity + noise
-            fit = _fit_one_curve(seconds, noisy_intensity, intensity_err, image_sigma)
+            fit = _fit_one_curve(
+                seconds,
+                noisy_intensity,
+                intensity_err,
+                image_sigma,
+                analysis_flavor=flavor.name,
+                temperature_k=temperature_k,
+                delta_chi2_threshold_by_temperature=delta_chi2_threshold_by_temperature,
+            )
             total_point_count += int(dtphs.size)
             fallback_point_count += used_fallback
 
@@ -506,7 +600,8 @@ def run_stage(
                 "realization": realization,
                 "true_tau_seconds": true_tau,
                 "true_amplitude_electrons": amplitude,
-                "true_fit_coeff": coeff,
+                "true_fit_coeff": true_coeff,
+                "true_offset_electrons": true_offset,
                 "analytic_peak_time_seconds": analytic_peak_time,
                 "analytic_peak_intensity_electrons": analytic_peak_intensity,
                 "sampled_peak_time_seconds": sampled_peak_time,
@@ -521,7 +616,15 @@ def run_stage(
             if realization == 0:
                 fit_intensity = None
                 if not fit["fit_failed"] and np.isfinite(fit["fit_coeff"]) and np.isfinite(fit["fit_tau_seconds"]):
-                    fit_intensity = intensity_function(seconds, fit["fit_coeff"], fit["fit_tau_seconds"])
+                    if flavor.fit_offset:
+                        fit_intensity = intensity_function_offset(
+                            seconds,
+                            fit["fit_coeff"],
+                            fit["fit_tau_seconds"],
+                            fit["fit_offset"],
+                        )
+                    else:
+                        fit_intensity = intensity_function(seconds, fit["fit_coeff"], fit["fit_tau_seconds"])
                 plot_rows[tau_label] = {
                     "true_tau_seconds": true_tau,
                     "true_intensity": true_intensity,
@@ -611,6 +714,7 @@ def run_stage(
     summary = {
         "producing_stage": STAGE_ID,
         "produced_at": produced_at,
+        "analysis_flavor": flavor.name,
         "code_path": str(code_path.resolve()),
         "inputs": [
             str((workspace / "agents" / "04_intensity_error_scaling.md").resolve()),
@@ -620,7 +724,7 @@ def run_stage(
             str(stage03_noise.resolve()),
             str(stage05_npz.resolve()),
             str(stage05_json.resolve()),
-            str((root / "dipole.py").resolve()),
+            str((root / f"{flavor.dipole_module}.py").resolve()),
         ],
         "outputs": [
             str(output_csv.resolve()),
@@ -638,6 +742,7 @@ def run_stage(
         },
         "cuts": {
             "fit_model": "dipole.intensity_function(tph, coeff, tau)",
+            "analysis_flavor": flavor.name,
             "fit_bounds": {"coeff": [0.0, "inf"], "tau_seconds": [1e-8, 1000.0]},
             "initial_coeff": "max(noisy intensities) * 8 / 3000 / 5.2, matching fitTrapIntensity",
             "initial_tau": "seconds[argmax(noisy intensities)], matching fitTrapIntensity",
@@ -680,8 +785,16 @@ def main() -> None:
     parser.add_argument("--quadrant", type=int, default=DEFAULT_QUADRANT)
     parser.add_argument("--realizations", type=int, default=DEFAULT_REALIZATIONS)
     parser.add_argument("--seed", type=int, default=DEFAULT_SEED)
+    parser.add_argument("--analysis-flavor", choices=["legacy", "minimal_caldet", "minimal"], default="legacy")
     args = parser.parse_args()
-    summary = run_stage(args.root, args.temperature, args.quadrant, args.realizations, args.seed)
+    summary = run_stage(
+        args.root,
+        args.temperature,
+        args.quadrant,
+        args.realizations,
+        args.seed,
+        analysis_flavor=args.analysis_flavor,
+    )
     print(json.dumps(_as_builtin({
         "produced_at": summary["produced_at"],
         "outputs": summary["outputs"],

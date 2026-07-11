@@ -56,6 +56,52 @@ C_RED = '#be0031'    # trap-affected / Monte Carlo / 'with traps'
 C_BLUE = '#00429d'   # observed / baseline / 'without traps'
 C_REF = 'slategrey'  # reference lines (operating temp, 1h/1day/1yr, etc.)
 C_SEQ = ['#be0031', '#00429d', '#FFB000', 'seagreen', 'darkviolet']  # multi-series
+C_BLUE_LIGHT = '#99b3d8'  # tint of C_BLUE, for a same-hue two-tone stack sharing one (blue-coded) axis
+
+# Shared axes rect for the completeness/efficiency pair that gets stacked
+# together in one document figure (plot_completeness_overlay,
+# plot_efficiency_correction_combined). Three things fight a naive
+# fixed-margin approach here:
+#  1. bbox_inches="tight" passed directly to a savefig call crops that PDF to
+#     its own content -- since the overlay has a twinx() right axis and the
+#     combined plot doesn't, "tight" cropping gives the two different page
+#     widths. Fix: don't pass bbox_inches="tight" to either savefig call.
+#  2. setup_style() sets 'figure.autolayout': True, which makes matplotlib
+#     call tight_layout() again at draw/save time REGARDLESS of any
+#     subplots_adjust() call -- silently overriding these margins, and
+#     computing a different rectangle for each figure depending on how much
+#     label space its own axes need (again, the twinx right-axis labels).
+#     Fix: both figures must call fig.set_layout_engine(None) right after
+#     creation to opt out of autolayout before subplots_adjust runs.
+#  3. Some callers of these functions (e.g. notebook/figures/make_figures.py)
+#     set the *global* rcParams["savefig.bbox"] = "tight" as part of their own
+#     style setup. Since our savefig calls pass bbox_inches=None (the
+#     default), that means "use whatever rcParams["savefig.bbox"] currently
+#     is" -- so a caller's global rcParam silently reintroduces the same
+#     per-figure-content cropping as (1), from outside this module entirely.
+#     Fix: wrap each savefig call in `with mpl.rc_context({"savefig.bbox":
+#     None}):` so it's pinned to "not tight" regardless of caller state.
+#  4. Even with (2)'s set_layout_engine(None), the axes rect from
+#     fig.subplots_adjust() was measured (by parsing the saved PDFs'
+#     content streams directly) to NOT stick -- something still repositions
+#     the Axes at draw time, back to a tight_layout-style rect. subplots_adjust
+#     is only ever a hint that a layout engine is free to override; the robust
+#     primitive is ax.set_position(), which explicitly flags that Axes
+#     `in_layout=False` and opts it out of layout-engine control outright.
+#     Fix: call ax.set_position(_PAIRED_AXES_RECT) (on every Axes in the
+#     figure, including twinx siblings) as the last step before savefig,
+#     instead of fig.subplots_adjust(**_PAIRED_FIG_MARGINS).
+# With all four disabled, the Axes occupy the exact same figure-fraction
+# rectangle in both PDFs, so a \includegraphics[width=\linewidth] stack aligns
+# regardless of what either axes' own tick/axis labels need. Retune together
+# if either figure's content changes enough to need more/less margin.
+_PAIRED_FIG_MARGINS = dict(left=0.09, right=0.86, bottom=0.12, top=0.95)
+_PAIRED_AXES_RECT = [
+    _PAIRED_FIG_MARGINS["left"],
+    _PAIRED_FIG_MARGINS["bottom"],
+    _PAIRED_FIG_MARGINS["right"] - _PAIRED_FIG_MARGINS["left"],
+    _PAIRED_FIG_MARGINS["top"] - _PAIRED_FIG_MARGINS["bottom"],
+]
 
 
 def setup_style(use_tex=True):
@@ -638,7 +684,7 @@ def plot_characterized_traps(agg, save=True, show_sigma_xerr=True,
         Line2D([0], [0], marker='o', color=C_RED, markerfacecolor=C_RED, markersize=8,
                label='High-Energy Population'),
         Line2D([0], [0], marker='o', color=C_BLUE, markerfacecolor=C_BLUE, markersize=8,
-               label='Standard Population'),
+               label='Main Population'),
         Line2D([0], [0], linestyle='--', color=C_REF, lw=2, label='Operating Temperature'),
     ]
     custom_handles2 = custom_handles[:2]
@@ -971,20 +1017,22 @@ def plot_completeness_overlay(m3, save=True, log_hist=False):
     measured_135 = m3['measured_135']
     extrapolated_135 = ~measured_135
 
-    fig, ax = plt.subplots(figsize=(16 * 0.8, 9 * 0.8))
-    ax.plot(tau_grid, default_curve, color="tab:red", linewidth=2.2,
+    fig, ax = plt.subplots(figsize=(16 * 0.8, 9 * 0.8 ))
+    fig.set_layout_engine(None)  # see _PAIRED_FIG_MARGINS: autolayout would override subplots_adjust below
+    ax.plot(tau_grid, default_curve, color=C_RED, linewidth=2.2,
             label="Detection Probability")
     ax.set_xscale("log")
     ax.set_ylim(-0.02, 1.02)
     ax.set_xlabel("$\\tau_e(135\\,\\mathrm{K})$ [s]")
-    ax.set_ylabel("$\\bar{P}(\\mathrm{characterized},E)$", color="tab:red")
-    ax.tick_params(axis="y", labelcolor="tab:red")
+    ax.set_ylabel("$\\bar{P}(\\mathrm{characterized},E)$", color=C_RED)
+    ax.tick_params(axis="y", labelcolor=C_RED)
+    ax.grid(True, which="both", alpha=0.3)
 
     ax_hist = ax.twinx()
     ax_hist.stairs(tau_hist, tau_edges, color=C_BLUE, linewidth=1.5)
     ax_hist.hist(
         [tau_135_records[extrapolated_135], tau_135_records[measured_135]],
-        bins=tau_edges, stacked=True, color=["tab:blue", "tab:green"],
+        bins=tau_edges, stacked=True, color=[C_BLUE, C_BLUE_LIGHT],
         alpha=0.65, label=["Extrapolated", "Measured"])
     ax_hist.set_ylabel("\\# of Traps", color=C_BLUE)
     ax_hist.tick_params(axis="y", labelcolor=C_BLUE)
@@ -1003,10 +1051,22 @@ def plot_completeness_overlay(m3, save=True, log_hist=False):
 
     lines, labels = ax.get_legend_handles_labels()
     hist_lines, hist_labels = ax_hist.get_legend_handles_labels()
-    ax.legend(lines + hist_lines, labels + hist_labels, loc="upper right", fontsize=small)
+    ax.legend(lines + hist_lines, labels + hist_labels, loc="lower left",
+              frameon=True, fontsize=small, ncol=1)
+    # set_position (not subplots_adjust) on BOTH axes -- see _PAIRED_AXES_RECT
+    # docstring; the twinx sibling needs its own explicit call too.
+    ax.set_position(_PAIRED_AXES_RECT)
+    ax_hist.set_position(_PAIRED_AXES_RECT)
     if save:
         ensure_figures_dir()
-        plt.savefig(f'{figures_dir()}/efficiency_completeness.pdf', dpi=300)
+        out = Path(figures_dir()) / "efficiency_completeness.pdf"
+        # rc_context override: some callers (e.g. make_figures.py) set the
+        # global rcParams["savefig.bbox"] = "tight", which silently discards
+        # _PAIRED_FIG_MARGINS at save time since bbox_inches=None here means
+        # "use the rcParam default". Force it off locally regardless.
+        with mpl.rc_context({"savefig.bbox": None}):
+            fig.savefig(out, dpi=300)
+        print(f"Saved: {out}")
     plt.show()
     plt.close()
 
@@ -1037,7 +1097,7 @@ def plot_completeness_map(m3, save=True):
     ax.legend(loc="lower right")
     if save:
         ensure_figures_dir()
-        plt.savefig(f'{figures_dir()}/prob_of_measuring.pdf', dpi=300)
+        plt.savefig(f'{figures_dir()}/prob_of_measuring.png', dpi=300)
     plt.show()
 
     unbounded = summary["unbounded_regime"]["all_temperatures_out_of_stage08_tau_band"]
@@ -1211,6 +1271,57 @@ def plot_tau135_energy_scatter(m3):
     plt.close()
 
 
+def _completeness_correction(tau_hist, tau_edges, tau_grid, default_curve, numerator,
+                              min_efficiency, correction_tau_min, correction_tau_max):
+    """Shared efficiency-correction core for ``plot_upper_limit_hist``,
+    ``plot_efficiency_corrected_hist``, and ``plot_efficiency_correction_combined``.
+
+    ``numerator`` is whatever gets divided by the completeness curve --
+    ``tau_hist`` itself for the point estimate, or
+    ``gamma.ppf(confidence_level, tau_hist + 1)`` for the upper-limit mode.
+    Everything else (completeness lookup, valid-efficiency mask, and the
+    interior-gap guard) is identical between the two, so it lives here once.
+    Returns ``(corrected_tau_hist, valid_indices)``.
+    """
+    tau_bin_centers = np.sqrt(tau_edges[:-1] * tau_edges[1:])
+    # default_curve already includes the energy-fit survival factor
+    # (applied once in load_method3; see ENERGY_FIT_SURVIVAL).
+    completeness_at_bins = np.interp(np.log10(tau_bin_centers), np.log10(tau_grid),
+                                     default_curve, left=np.nan, right=np.nan)
+    valid_efficiency = (
+        np.isfinite(completeness_at_bins)
+        & (completeness_at_bins >= min_efficiency)
+        & (tau_bin_centers >= correction_tau_min)
+        & (tau_bin_centers <= correction_tau_max)
+    )
+    print(f"Excluded {np.sum(~valid_efficiency)} bins with completeness below "
+          f"{min_efficiency:.0%} or outside the model grid.")
+
+    corrected_tau_hist = np.full(tau_hist.shape, np.nan, dtype=float)
+    corrected_tau_hist[valid_efficiency] = (
+        numerator[valid_efficiency] / completeness_at_bins[valid_efficiency])
+    assert np.all(np.isfinite(corrected_tau_hist[valid_efficiency])), \
+        "division produced NaN/inf inside the valid-efficiency region"
+
+    # The saved/plotted array below spans [first, last] of the valid bins by
+    # INDEX, not by mask -- if valid_efficiency has an interior gap (a
+    # non-monotonic completeness curve dropping below min_efficiency and
+    # then recovering), those gap bins get zero-filled next and would be
+    # silently written into the seed histogram as "confidently zero traps"
+    # rather than "unknown / below the completeness floor". Fail loudly
+    # instead of masking it with a post-hoc isfinite check.
+    valid_indices = np.flatnonzero(valid_efficiency)
+    if valid_indices.size:
+        first, last = valid_indices[0], valid_indices[-1]
+        assert np.all(valid_efficiency[first:last + 1]), (
+            "valid-efficiency mask has an interior gap between bins "
+            f"{first} and {last} (non-monotonic completeness curve) -- "
+            "zero-filling would silently misrepresent those bins as zero traps"
+        )
+    corrected_tau_hist[~valid_efficiency] = 0.0
+    return corrected_tau_hist, valid_indices
+
+
 def plot_upper_limit_hist(m3, confidence_level=0.90, min_efficiency=0.0,
                           correction_tau_min=1e-4, correction_tau_max=1e10,
                           write=False, write_path=None, save=True):
@@ -1234,24 +1345,10 @@ def plot_upper_limit_hist(m3, confidence_level=0.90, min_efficiency=0.0,
         write_path = m3['paths']['tau_hist_upper_npz']
         print(f"Upper-limit seed target (flavor='{m3['paths']['analysis_flavor']}'): {write_path}")
 
-    tau_bin_centers = np.sqrt(tau_edges[:-1] * tau_edges[1:])
-    # default_curve already includes the energy-fit survival factor
-    # (applied once in load_method3; see ENERGY_FIT_SURVIVAL).
-    completeness_at_bins = np.interp(np.log10(tau_bin_centers), np.log10(tau_grid),
-                                     default_curve, left=np.nan, right=np.nan)
-    valid_efficiency = (
-        np.isfinite(completeness_at_bins)
-        & (completeness_at_bins >= min_efficiency)
-        & (tau_bin_centers >= correction_tau_min)
-        & (tau_bin_centers <= correction_tau_max)
-    )
-    print(f"Excluded {np.sum(~valid_efficiency)} bins with completeness below "
-          f"{min_efficiency:.0%} or outside the model grid.")
-
     raw_upper_limits = gamma.ppf(confidence_level, tau_hist + 1)
-    corrected_tau_hist = np.full(tau_hist.shape, np.nan, dtype=float)
-    corrected_tau_hist[valid_efficiency] = (
-        raw_upper_limits[valid_efficiency] / completeness_at_bins[valid_efficiency])
+    corrected_tau_hist, valid_indices = _completeness_correction(
+        tau_hist, tau_edges, tau_grid, default_curve, raw_upper_limits,
+        min_efficiency, correction_tau_min, correction_tau_max)
 
     coord_list = m3['paths']['dipole_coord_list_npz']
     with np.load(coord_list, allow_pickle=True) as _d:
@@ -1260,11 +1357,8 @@ def plot_upper_limit_hist(m3, confidence_level=0.90, min_efficiency=0.0,
     print(f'scale of total traps after corrections: '
           f'{np.nansum(corrected_tau_hist) / n_detected} '
           f'(n_detected={n_detected} from {coord_list.name})')
-    corrected_tau_hist[~valid_efficiency] = 0.0
-    assert np.all(np.isfinite(corrected_tau_hist)), "histogram contains NaN/inf"
 
     if write_path is not None:
-        valid_indices = np.flatnonzero(valid_efficiency)
         first, last = valid_indices[0], valid_indices[-1]
         np.savez(write_path,
                  hist=corrected_tau_hist[first:last + 1],
@@ -1325,24 +1419,9 @@ def plot_efficiency_corrected_hist(m3, min_efficiency=0.0,
             '_upper_limit', '_efficiency_corrected'))
         print(f"Efficiency-corrected seed target (flavor='{m3['paths']['analysis_flavor']}'): {write_path}")
 
-    tau_bin_centers = np.sqrt(tau_edges[:-1] * tau_edges[1:])
-    # default_curve already includes the energy-fit survival factor
-    # (applied once in load_method3; see ENERGY_FIT_SURVIVAL).
-    completeness_at_bins = np.interp(np.log10(tau_bin_centers), np.log10(tau_grid),
-                                     default_curve, left=np.nan, right=np.nan)
-    valid_efficiency = (
-        np.isfinite(completeness_at_bins)
-        & (completeness_at_bins >= min_efficiency)
-        & (tau_bin_centers >= correction_tau_min)
-        & (tau_bin_centers <= correction_tau_max)
-    )
-    print(f"Excluded {np.sum(~valid_efficiency)} bins with completeness below "
-          f"{min_efficiency:.0%} or outside the model grid.")
-
-    point_estimate = tau_hist
-    corrected_tau_hist = np.full(tau_hist.shape, np.nan, dtype=float)
-    corrected_tau_hist[valid_efficiency] = (
-        point_estimate[valid_efficiency] / completeness_at_bins[valid_efficiency])
+    corrected_tau_hist, valid_indices = _completeness_correction(
+        tau_hist, tau_edges, tau_grid, default_curve, tau_hist,
+        min_efficiency, correction_tau_min, correction_tau_max)
 
     coord_list = m3['paths']['dipole_coord_list_npz']
     with np.load(coord_list, allow_pickle=True) as _d:
@@ -1351,11 +1430,8 @@ def plot_efficiency_corrected_hist(m3, min_efficiency=0.0,
     print(f'scale of total traps after corrections: '
           f'{np.nansum(corrected_tau_hist) / n_detected} '
           f'(n_detected={n_detected} from {coord_list.name})')
-    corrected_tau_hist[~valid_efficiency] = 0.0
-    assert np.all(np.isfinite(corrected_tau_hist)), "histogram contains NaN/inf"
 
     if write_path is not None:
-        valid_indices = np.flatnonzero(valid_efficiency)
         first, last = valid_indices[0], valid_indices[-1]
         np.savez(write_path,
                  hist=corrected_tau_hist[first:last + 1],
@@ -1366,7 +1442,7 @@ def plot_efficiency_corrected_hist(m3, min_efficiency=0.0,
     ax.stairs(tau_hist, tau_edges, color=C_BLUE, linewidth=1.8, fill=True, alpha=0.25,
               label="Characterized Traps")
     ax.stairs(corrected_tau_hist, tau_edges, color="black", linewidth=1.8,
-              label="Efficiency-corrected (point estimate)")
+              label="Efficiency-corrected")
     ax.set_xscale("log")
     ax.set_yscale("log")
     ax.set_xlim(tau_edges[0], tau_edges[-1])
@@ -1382,6 +1458,73 @@ def plot_efficiency_corrected_hist(m3, min_efficiency=0.0,
     plt.show()
     plt.close()
     return corrected_tau_hist
+
+
+def plot_efficiency_correction_combined(m3, confidence_level=0.90, min_efficiency=0.0,
+                                        correction_tau_min=6e-5, ul_tau_max=5e7,
+                                        point_tau_max=1e9, save=True):
+    """Point-estimate and 90% CL upper-limit efficiency corrections on one axis.
+
+    Overlays the outputs of ``plot_efficiency_corrected_hist`` and
+    ``plot_upper_limit_hist`` in a single figure so the two don't have to be
+    rendered (and eyeballed) as separate plots. The two correction bands
+    differ by design -- the point estimate is trusted out to ``1e9`` s while
+    the UL is capped at ``5e7`` s to avoid the tiny-efficiency blow-up in the
+    tail -- so both bounds are exposed as separate arguments rather than
+    collapsed to one.
+
+    Display-only: unlike the two single-curve functions this never writes a
+    seed NPZ. Seeding the simulation still goes through
+    ``plot_upper_limit_hist(..., write=True)`` /
+    ``plot_efficiency_corrected_hist(..., write=True)`` directly, since each
+    seed is tied to its own correction band.
+    """
+    tau_hist = m3['tau_hist']
+    tau_edges = m3['tau_edges']
+    tau_grid = m3['tau_grid']
+    default_curve = m3['default_curve']
+
+    raw_upper_limits = gamma.ppf(confidence_level, tau_hist + 1)
+    ul_corrected, _ = _completeness_correction(
+        tau_hist, tau_edges, tau_grid, default_curve, raw_upper_limits,
+        min_efficiency, correction_tau_min, ul_tau_max)
+    point_corrected, _ = _completeness_correction(
+        tau_hist, tau_edges, tau_grid, default_curve, tau_hist,
+        min_efficiency, correction_tau_min, point_tau_max)
+
+    # Same figsize as plot_completeness_overlay (the two are stacked together
+    # in one document figure); _PAIRED_FIG_MARGINS below keeps the plotted
+    # box itself aligned between the two PDFs -- see the constant's docstring.
+    fig, ax = plt.subplots(figsize=(16 * 0.8, 9 * 0.8))
+    fig.set_layout_engine(None)  # see _PAIRED_FIG_MARGINS: autolayout would override subplots_adjust below
+    ax.stairs(ul_corrected, tau_edges, color="black", linewidth=1.8, alpha=0.3,
+              fill=False, hatch='//', label="Efficiency-corrected 90\\% CL UL")
+    ax.stairs(tau_hist, tau_edges, color=C_BLUE, linewidth=1.8, fill=True, alpha=0.25,
+              label="Characterized Traps")
+    ax.stairs(point_corrected, tau_edges, color="black", linewidth=1.8,
+              label="Efficiency-corrected")
+    ax.set_xscale("log")
+    ax.set_yscale("log")
+    ax.set_xlim(tau_edges[0], tau_edges[-1])
+    ax.set_xlabel("$\\tau_e(135\\,\\mathrm{K})$ [s]")
+    ax.set_ylabel("Estimated number of traps")
+    ax.legend(frameon=False, fontsize=small, loc='upper left', ncol=1)
+    ax.grid(True, which="both", alpha=0.3)
+    # set_position (not subplots_adjust) -- see _PAIRED_AXES_RECT docstring.
+    ax.set_position(_PAIRED_AXES_RECT)
+    if save:
+        ensure_figures_dir()
+        out = Path(figures_dir()) / "tau_at_135k_hist_efficiency_combined.pdf"
+        # rc_context override: see the matching comment in
+        # plot_completeness_overlay -- some callers set the global
+        # rcParams["savefig.bbox"] = "tight", which would otherwise discard
+        # _PAIRED_FIG_MARGINS at save time.
+        with mpl.rc_context({"savefig.bbox": None}):
+            fig.savefig(out, dpi=300)
+        print(f"Saved: {out}")
+    plt.show()
+    plt.close()
+    return {'point_estimate': point_corrected, 'upper_limit': ul_corrected}
 
 
 # ---------------------------------------------------------------------------
@@ -1536,6 +1679,24 @@ def scenario_dir(condition, population='baseline', vp=3.0, clear='sequencer',
     return os.path.join(base, label) + os.sep
 
 
+def resolve_scenario_rundir(entry):
+    """Return the concrete run directory for a scenario entry.
+
+    Notebook scenario lists may hold either a literal run-directory string or a
+    scenario spec dict accepted by ``aggregate_scenario`` / ``compare_scenarios``.
+    Dict specs with ``systematics=('vp',)`` resolve to the central V_p directory.
+    """
+    if not isinstance(entry, dict):
+        return entry
+
+    spec = dict(entry)
+    systs = spec.pop('systematics', ())
+    condition = spec.pop('condition')
+    if 'vp' in systs and 'vp' not in spec:
+        spec['vp'] = VP_BASELINE
+    return scenario_dir(condition, **spec)
+
+
 def aggregate_scenario(spec, mask='Halo+Bleed+HotColumn+HotPixel',
                        event_type='1e', vp_values=VP_ORDER):
     """Resolve a scenario spec to its central plot_simulation_results tuple plus
@@ -1602,9 +1763,14 @@ def plot_simulation_results(rundir, mask='Halo+Bleed+HotColumn+HotPixel',
                             event_type='1e', showFit=True,showDensity=False, saveFig=True):
     """Aggregate one simulation run dir and fit exposure-(in)dependent rates (cell 38).
 
+    ``rundir`` may be either a concrete path or a scenario spec dict; dict specs
+    are resolved to their central campaign directory.
+
     Returns (exp_indep, exp_dep, exp_indep_notraps, exp_dep_notraps, UR_expindep,
     UR_expdep, err_indep, err_dep, err_indep_notraps, err_dep_notraps).
     """
+    rundir = resolve_scenario_rundir(rundir)
+
     if event_type not in ['1e', '2e']:
         raise ValueError("event_type must be either '1e' or '2e'")
     count_key = 'counts' if event_type == '1e' else '2e_counts'
@@ -1949,7 +2115,7 @@ def compare_scenarios(scenarios, mask='Halo+Bleed+HotColumn+HotPixel',
     res = np.array(results)
     y_pos = np.arange(len(labels))
 
-    fig, axes = plt.subplots(2, 1, figsize=(12, max(8, 4 * len(labels))), sharey=True)
+    fig, axes = plt.subplots(1, 2, figsize=(24, max(8, 4 * len(labels))), sharey=True)
     fig.subplots_adjust(hspace=0.3)
 
     def panel(ax, col_indep, col_notraps, col_truth, col_err_traps, col_err_notraps,

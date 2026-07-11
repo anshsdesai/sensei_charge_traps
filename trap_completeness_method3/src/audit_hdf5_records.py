@@ -5,6 +5,7 @@ import argparse
 import csv
 import json
 import math
+import subprocess
 import sys
 from collections import Counter, defaultdict
 from dataclasses import dataclass
@@ -20,6 +21,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from dipole import log_energy_cross_section
+from trap_completeness_method3.src.analysis_flavors import AnalysisFlavor, get_analysis_flavor
 
 
 STAGE_ID = "01_hdf5_records_audit"
@@ -39,6 +41,7 @@ REQUIRED_TEMP_FIELDS = [
 class FileAuditResult:
     records: list[dict[str, Any]]
     summary: dict[str, Any]
+    selection_counts_by_good_temperature: dict[int, dict[str, int]]
 
 
 def _parse_quad_name(name: str) -> int:
@@ -71,6 +74,15 @@ def _is_close_sequence(reference: np.ndarray, candidate: np.ndarray) -> bool:
     )
 
 
+def _passes_final_catalog(trap_attrs: dict[str, Any]) -> bool:
+    return (
+        bool(trap_attrs.get("WellBehavedTrap", False))
+        and not bool(trap_attrs.get("EnergyFitFailed", False))
+        and bool(trap_attrs.get("GoodEnergyFit", False))
+        and bool(trap_attrs.get("OrientationConsistent", True))
+    )
+
+
 def audit_file(path: Path, label: str, produced_at: str, code_path: str) -> FileAuditResult:
     records: list[dict[str, Any]] = []
     characterized_count = 0
@@ -86,6 +98,7 @@ def audit_file(path: Path, label: str, produced_at: str, code_path: str) -> File
     tau135_examples: list[dict[str, Any]] = []
     temperatures_seen: set[int] = set()
     good_temp_count_counter: Counter[int] = Counter()
+    selection_counts_by_good_temperature: dict[int, Counter[str]] = defaultdict(Counter)
 
     with h5py.File(path, "r") as h5:
         for quad_name, quad_group in h5.items():
@@ -97,6 +110,7 @@ def audit_file(path: Path, label: str, produced_at: str, code_path: str) -> File
                 well_behaved = bool(trap_attrs.get("WellBehavedTrap", False))
                 energy_fit_failed = bool(trap_attrs.get("EnergyFitFailed", False))
                 good_energy_fit = bool(trap_attrs.get("GoodEnergyFit", False))
+                orientation_consistent = bool(trap_attrs.get("OrientationConsistent", True))
                 temp_names = sorted(
                     [name for name in dp_group.keys() if name.startswith("temp_")],
                     key=_parse_temp_name,
@@ -160,7 +174,19 @@ def audit_file(path: Path, label: str, produced_at: str, code_path: str) -> File
                             f"{seconds.shape}, {intensities.shape}, {intensity_err.shape}"
                         )
 
-                if well_behaved and (not energy_fit_failed) and good_energy_fit:
+                good_count = len(good_temperatures)
+                selection_counts_by_good_temperature[good_count]["total"] += 1
+                if well_behaved:
+                    selection_counts_by_good_temperature[good_count]["well_behaved"] += 1
+                if orientation_consistent:
+                    selection_counts_by_good_temperature[good_count]["orientation_consistent"] += 1
+                if not energy_fit_failed:
+                    selection_counts_by_good_temperature[good_count]["energy_fit_not_failed"] += 1
+                if good_energy_fit:
+                    selection_counts_by_good_temperature[good_count]["good_energy_fit"] += 1
+
+                if _passes_final_catalog(trap_attrs):
+                    selection_counts_by_good_temperature[good_count]["final_catalog"] += 1
                     characterized_count += 1
                     energy = float(trap_attrs["energy_BestFitEnergy"])
                     cross_section = float(trap_attrs["energy_BestFitCrossSection"])
@@ -201,9 +227,15 @@ def audit_file(path: Path, label: str, produced_at: str, code_path: str) -> File
                         "has_temp_135": has_temp_135,
                         "tau_135_measured_fit_seconds": tau_at_135_measured,
                         "tau_135_good_intensity_fit": tau_135_good_intensity_fit,
+                        "OrientationConsistent": orientation_consistent,
+                        "OrientationClass": str(trap_attrs.get("OrientationClass", "")),
+                        "n_positive_temps": int(trap_attrs.get("n_positive_temps", -1)),
+                        "n_negative_temps": int(trap_attrs.get("n_negative_temps", -1)),
+                        "energy_p_value": float(trap_attrs.get("energy_p_value", math.nan)),
+                        "energy_reduced_chi2": float(trap_attrs.get("energy_reduced_chi2", math.nan)),
                     }
                     records.append(record)
-                    good_temp_count_counter[len(good_temperatures)] += 1
+                    good_temp_count_counter[good_count] += 1
 
     temp_field_summary: dict[str, dict[str, Any]] = {}
     for temp_name, counts in sorted(temp_field_presence.items(), key=lambda item: _parse_temp_name(item[0])):
@@ -254,8 +286,18 @@ def audit_file(path: Path, label: str, produced_at: str, code_path: str) -> File
             "example_comparisons": tau135_examples,
             "status": "PASS",
         },
+        "selection_counts_by_good_temperature": {
+            str(k): dict(sorted(v.items()))
+            for k, v in sorted(selection_counts_by_good_temperature.items())
+        },
     }
-    return FileAuditResult(records=records, summary=summary)
+    return FileAuditResult(
+        records=records,
+        summary=summary,
+        selection_counts_by_good_temperature={
+            int(k): dict(v) for k, v in selection_counts_by_good_temperature.items()
+        },
+    )
 
 
 def write_csv(path: Path, rows: list[dict[str, Any]]) -> None:
@@ -268,6 +310,52 @@ def write_csv(path: Path, rows: list[dict[str, Any]]) -> None:
         writer.writerows(rows)
 
 
+def _file_specs_for_flavor(flavor: AnalysisFlavor) -> list[tuple[str, Path, Path]]:
+    return [
+        ("n_good_4", flavor.fit_hdf5_ngood4, flavor.records4_csv),
+        ("n_good_3", flavor.fit_hdf5_ngood3, flavor.records3_csv),
+    ]
+
+
+def _maybe_generate_missing_minimal(root: Path, flavor: AnalysisFlavor, path: Path, n_good: int, enabled: bool) -> None:
+    if path.exists() or flavor.name != "minimal_caldet":
+        return
+    command = [
+        sys.executable,
+        str(root / "run_charge_traps.py"),
+        "--pipeline",
+        flavor.run_charge_traps_pipeline,
+        "--detection",
+        flavor.run_charge_traps_detection,
+        "--well_behaved_threshold",
+        str(n_good),
+        "--overwrite",
+        "fit",
+    ]
+    if not enabled:
+        rendered = " ".join(command)
+        raise FileNotFoundError(
+            f"Missing {path}. Generate it with:\n  {rendered}\n"
+            "or rerun this audit with --generate-missing-minimal."
+        )
+    subprocess.run(command, cwd=root, check=True)
+
+
+def _merge_selection_counts(results: dict[str, FileAuditResult]) -> dict[str, Any]:
+    merged: dict[str, Any] = {}
+    for label, result in results.items():
+        per_count = {}
+        for good_count, counts in sorted(result.selection_counts_by_good_temperature.items()):
+            total = int(counts.get("total", 0))
+            final = int(counts.get("final_catalog", 0))
+            per_count[str(good_count)] = {
+                **{k: int(v) for k, v in sorted(counts.items())},
+                "final_catalog_survival_fraction": float(final / total) if total else math.nan,
+            }
+        merged[label] = per_count
+    return merged
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Audit Method 3 HDF5 characterized-trap records.")
     parser.add_argument(
@@ -276,9 +364,21 @@ def main() -> None:
         default=Path(__file__).resolve().parents[2],
         help="Repository root.",
     )
+    parser.add_argument(
+        "--analysis-flavor",
+        choices=["legacy", "minimal_caldet", "minimal"],
+        default="legacy",
+        help="Which analysis catalog to audit. Default preserves legacy outputs.",
+    )
+    parser.add_argument(
+        "--generate-missing-minimal",
+        action="store_true",
+        help="If minimal_caldet threshold-3 HDF5 is missing, run run_charge_traps.py to generate it.",
+    )
     args = parser.parse_args()
 
     root = args.root.resolve()
+    flavor = get_analysis_flavor(args.analysis_flavor)
     workspace = root / "trap_completeness_method3"
     cache_dir = workspace / "cache"
     cache_dir.mkdir(parents=True, exist_ok=True)
@@ -286,28 +386,57 @@ def main() -> None:
     produced_at = datetime.now().astimezone().isoformat(timespec="seconds")
     code_path = str((workspace / "src" / "audit_hdf5_records.py").resolve())
 
-    file_specs = [
-        ("n_good_4", root / "fit_dipole_spectra_err_4.h5", cache_dir / "01_records_ngood4.csv"),
-        ("n_good_3", root / "fit_dipole_spectra_err_3.h5", cache_dir / "01_records_ngood3.csv"),
-    ]
+    file_specs = _file_specs_for_flavor(flavor)
+    for label, source_path, _ in file_specs:
+        n_good = 4 if label.endswith("_4") else 3
+        _maybe_generate_missing_minimal(root, flavor, source_path, n_good, args.generate_missing_minimal)
 
     all_summary: dict[str, Any] = {
         "producing_stage": STAGE_ID,
         "produced_at": produced_at,
         "code_path": code_path,
+        "analysis_flavor": flavor.name,
         "inputs": [str(spec[1]) for spec in file_specs],
         "outputs": [str(spec[2]) for spec in file_specs]
-        + [str((cache_dir / "01_hdf5_field_summary.json").resolve())],
+        + [
+            str((cache_dir / ("01_hdf5_field_summary.json" if flavor.name == "legacy" else f"01_hdf5_field_summary_{flavor.output_tag}.json")).resolve()),
+            str((cache_dir / ("01_selection_summary.json" if flavor.name == "legacy" else f"01_selection_summary_{flavor.output_tag}.json")).resolve()),
+        ],
         "file_summaries": {},
     }
 
+    results: dict[str, FileAuditResult] = {}
     for label, source_path, output_csv in file_specs:
         result = audit_file(source_path, label, produced_at, code_path)
         write_csv(output_csv, result.records)
+        results[label] = result
         all_summary["file_summaries"][label] = result.summary
 
-    with (cache_dir / "01_hdf5_field_summary.json").open("w", encoding="utf-8") as handle:
+    field_summary_path = cache_dir / (
+        "01_hdf5_field_summary.json" if flavor.name == "legacy" else f"01_hdf5_field_summary_{flavor.output_tag}.json"
+    )
+    selection_summary_path = cache_dir / (
+        "01_selection_summary.json" if flavor.name == "legacy" else f"01_selection_summary_{flavor.output_tag}.json"
+    )
+
+    with field_summary_path.open("w", encoding="utf-8") as handle:
         json.dump(all_summary, handle, indent=2, sort_keys=True)
+        handle.write("\n")
+    selection_summary = {
+        "producing_stage": STAGE_ID,
+        "produced_at": produced_at,
+        "analysis_flavor": flavor.name,
+        "definition": (
+            "Fast handoff artifact for Stage 09. Counts are over every dipole in the source HDF5, "
+            "grouped by the number of GoodIntensityFit temperature points. final_catalog means "
+            "WellBehavedTrap, OrientationConsistent, not EnergyFitFailed, and GoodEnergyFit."
+        ),
+        "source_hdf5": {label: str(source_path.resolve()) for label, source_path, _ in file_specs},
+        "records_csv": {label: str(output_csv.resolve()) for label, _, output_csv in file_specs},
+        "selection_counts_by_good_temperature": _merge_selection_counts(results),
+    }
+    with selection_summary_path.open("w", encoding="utf-8") as handle:
+        json.dump(selection_summary, handle, indent=2, sort_keys=True)
         handle.write("\n")
 
     for label, summary in all_summary["file_summaries"].items():

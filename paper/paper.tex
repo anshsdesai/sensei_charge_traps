@@ -56,6 +56,7 @@
 \newcommand{\ansh}[1]{\textcolor{Fuchsia}{[ansh: #1]}}
 \newcommand{\preliminary}[1]{\textcolor{red}{[#1]}}
 
+\newcommand{\ntraps}{3798}
 \newcommand\sjt{\bgroup\markoverwith{\textcolor{blue}{\rule[0.5ex]{2pt}{0.4pt}}}\ULon}
 
 \newcommand{\chd}{\marginpar{CHD}}
@@ -96,161 +97,319 @@
 % ------------------------------------------------------
 
 \begin{abstract}
-\noindent Skipper Charge-Coupled Devices (Skipper-CCDs) are detectors with sub-eV resolution, allowing them to play a critical role in rare event searches. 
-A major challenge in experiments using these detectors is understanding and mitigating low-energy backgrounds which impact the single electron rate (SER). 
+\noindent Skipper Charge-Coupled Devices (Skipper-CCDs) are detectors with sub-eV resolution, allowing them to play a critical role in rare-event searches. 
+A major challenge in experiments using these detectors is understanding and mitigating low-energy backgrounds which impact the single-electron rate (SER). 
 One potential component of the SER could arise from single-electron charge traps caused by lattice defects. 
-In this work we present and use a new technique for generating uniform charge across the CCD to study single electron traps in a SENSEI sensor placed underground in the MINOS tunnel at Fermilab. 
-The underground shielding allows us to make use of the pocket pumping technique to probe traps at high temperatures for long periods of time, allowing us to measure traps that would have emission times $>10^3$ seconds at normal operating temperatures. 
-This is a regime not accessible in previous surface measurements of comparable sensors.
-We fully characterize a significant fraction of the identified traps and use this information to extrapolate their contribution to the single-electron background in SENSEI.
-\preliminary{We find that the studied population of traps does not significantly impact the single electron rate measured by SENSEI.}
-% \noindent Skipper Charge-Coupled Devices (Skipper-CCDs) are ultra-low-threshold detectors capable of detecting energy deposits in silicon at the eV scale. Increasingly used in rare-event searches, one of the major challenges in these experiments is mitigating low-energy backgrounds. In this work, we present results on trap characterization in a silicon Skipper-CCD produced in the same fabrication run as the SENSEI experiment at SNOLAB. Lattice defects contribute to backgrounds in rare-event searches through single-electron charge trapping. To investigate this, we employ the charge-pumping technique at different temperatures to identify dipoles produced by traps in the CCD channel. We fully characterize a fraction of these traps and use this information to extrapolate their contribution to the single-electron background in SENSEI. We find that this subpopulation of traps does not contribute significantly but more work is needed to assess the impact of the traps that can not be characterized. 
+In this work we use a new technique for generating uniform charge across the CCD to study single-electron traps in a SENSEI sensor placed underground in the MINOS tunnel at Fermilab. 
+The underground shielding allows us to make use of the pocket-pumping technique to probe traps at high temperatures for long periods of time, enabling sensitivity to traps with emission times $>10^3$ seconds at normal operating temperatures. 
+This regime was not accessible in previous surface measurements of comparable sensors.
+We fully characterize a large fraction of the identified traps and use this information to extrapolate their contribution to the single-electron background in SENSEI.
+Through simulation, we find the characterized population of traps does not significantly impact the single-electron rate.
+However, upon correcting for measurement inefficiency, we find that a substantial population of long-lived traps may exist.
+If these unobserved traps exist, they could explain a majority of the observed exposure-dependent single-electron rate in SENSEI.
+
+
 \end{abstract}
 
 \maketitle
 
 \section{Traps and single-electron backgrounds}\label{sec:intro}
-Skipper-Charge-Coupled-Devices (Skipper-CCDs) are pixelated silicon detectors that are widely used in rare-event searches~\cite{Smith2010, Holland:2003, Janesick1990,Wen1974}. 
-They are enhanced versions of CCDs that can perform repeated non-destructive measurements of output charge and consequently achieve sub-electron resolution~\cite{Tiffenberg:2017aac}, enabling sensitivity to particles that produce one or a few electrons when they interact with the bulk silicon. 
+Skipper Charge-Coupled-Devices (Skipper-CCDs) are pixelated silicon detectors widely used in rare-event searches~\cite{Smith2010, Holland:2003, Janesick1990,Wen1974}. 
+They are enhanced versions of CCDs that can perform repeated non-destructive measurements of output charge and consequently achieve sub-electron resolution~\cite{Tiffenberg:2017aac}, enabling sensitivity to particles that produce one or a few electrons when they interact with the bulk silicon.
+This has allowed the SENSEI and DAMIC experiments to achieve world-leading results in the search for light dark matter~\cite{Abramoff:2019dfb, Sensei2020, SENSEI:2023zdf,DAMIC-M:2023gxo,aguilar2022oscura,DAMIC-M:2025luv}. 
+These experiments are currently limited by low-energy backgrounds, particularly contributions to the single-electron rate (SER). 
+These backgrounds may arise from environmental effects~\cite{Du_2022,Du:2023soy,Sensei2020,SENSEI:2023zdf,SENSEI:2024yyt} or intrinsic processes within the sensor~\cite{senseiSEE,ampLight}, and characterizing them is crucial for maximizing the sensitivity of these and other experiments. 
+One possible source of the SER is charge deferred by traps. 
 
-The SENSEI and DAMIC experiments have achieved world leading results in the search for light dark matter, and significant efforts are underway to scale up these detectors and mitigate backgrounds~\cite{Abramoff:2019dfb, Sensei2020, SENSEI:2023zdf,DAMIC-M:2023gxo,aguilar2022oscura,DAMIC-M:2025luv}. 
-These backgrounds may arise from environmental effects~\cite{Du_2022,Du:2023soy,Sensei2020} or intrinsic processes within the sensor~\cite{senseiSEE,ampLight}, and characterizing them will be key to maximizing sensitivity.
-
-It is well known that defects can occur in the silicon from contaminants or vacancies that trap electrons (or holes) and release them after some time~\cite{claeys_metal_2018,pichler_intrinsic_2004,chroneos_oxygen_2015,wang_phosphorousvacancyoxygen_2013,collins_properties_1957,pintiliea_radiation_2009}. Due to these defects, charge from high energy backgrounds may become trapped and then released with a characteristic emission time $\tau_e$. If traps have sufficiently long $\tau_e$, they could produce uncorrelated single-electron events and therefore contribute to single-electron backgrounds. Results from the OSCURA collaboration~\cite{oscurasensors, trapsOscura} have indicated that elevated levels contaminants or defects were present in the silicon lattice of their Skipper-CCDs, motivating dedicated studies to understand the effects of possible defects in SENSEI CCDs on the SER.
-
-
-Recently, measurements were performed at LAMBDA Laboratory at the University of Buenos Aires surface on a CCD fabricated from the same wafer as science-grade SENSEI CCDs~\cite{Brusco:2025kus}. These measurements suggested that current analysis strategies may mitigate the effect of charge traps. However, these measurements were taken at surface, thus were only sensitive to a certain range of trap lifetimes. This is because measurement times are limited due to the high rate of environmental and cosmic backgrounds at the surface. Generally, the emission time of charge traps decreases as a function of temperature, and thus to probe very long-lived traps (traps that emit electrons several days or even months after the initial trapping) at the usual operating temperature of $\sim135~K$ it is important to take longer measurements at higher operating temperatures, which must be done with dedicated measurements in a shielded underground setup. In this work we describe such a measurement, which we perform with SENSEI CCDs $\sim100~$m underground in the MINOS cavern at Fermi National Accelerator Laboratory (FNAL).
-
-% The emission time of charge traps depends on its intrinsic energy (related to the source of the defect), its cross-section, and the temperature of the sensor. Emission time decreases exponentially as temperature increases. 
-
-
-The Skipper-CCDs used in this study are made of high-resistivity silicon with an active area of 6144 $\times$ 1024 pixels each of size 15 $\times$ 15 $\mu$~m housed in a vacuum chamber equipped with a vacuum pump and a cryocooler. The CCD has four readout amplifiers that each read out in parallel a ``quadrant'' of 512 rows by 3072 columns. The CCD was operated and read out with a Low-Threshold-Acquisition board (LTA)~\cite{LTA}. In \cref{sec:measurement} we describe a new technique used to uniformly illuminate the CCD and the subsequent measurements taken to identify charge traps. We describe in \cref{sec:identification} how traps were identified and in \cref{sec:analysis} the trap energy and temperature dependence. We also perform data-driven simulation studies to study the accessible range of traps based on these measurements. We conclude in \cref{sec:discussion} with the impact of the trap density on single-electron backgrounds in SENSEI and compare with previous results.
-
-
-\section{Charge Generation and Pocket-Pumping Measurements}\label{sec:measurement}
-Unlike in the previous work, we did not use an LED to uniformly illuminate the CCD. Instead we took advantage of a feature inherent to CCDs known as spurious charge. Spurious charge is generated when the voltages of pixels in the active area are changed when shifting charge to neighboring pixels~\cite{janesick2001scientific}  The charge scales linearly with the number of shifts performed, and exponentially with the voltage clock swing, as expected from~\cite{janesick2001scientific}. Therefore by performing symmetric back-and-forth shifts with high voltage swing (charge-generating shifts), charge can be generated uniformly across the CCD in a controlled, reproducible manner. In this work we used a voltage swing of 10~V and 100,000 shifts to generate approximately $2000~e^-$ of charge per pixel. 
-
-The pocket-pumping technique, described in detail in~\cite{trapsOscura} involves uniformly illuminating the CCD and then repeatedly moving the charge back and forth between the three pixel phases. If a trap exists in the edge phases, charges may be captured and released at a later time, spilling into the neighbor and creating a ``dipole'' signal relative to the uniform background. The number of charge carriers trapped and released, or in other words the intensity of the dipole ($I_{t_{ph}}$) is defined as half the difference in charge between the two pixels. The intensity depends on the number of pump cycles $N_{\text{pumps}}$ and the duration of each clock state $t_{ph}$.
+It is well known that defects can occur in the silicon lattice within the buried channel of a CCD from contaminants or vacancies that trap and release charge after a characteristic emission time determine by the properties of the defect or contaminant~\cite{claeys_metal_2018,pichler_intrinsic_2004,chroneos_oxygen_2015,wang_phosphorousvacancyoxygen_2013,collins_properties_1957,pintiliea_radiation_2009}. 
+If traps have sufficiently long emission times, they can produce uncorrelated single-electron events, therefore contributing to the SER. 
+Results from the OSCURA collaboration~\cite{oscurasensors, trapsOscura} indicated that contaminants in the silicon lattice of Skipper-CCDs could contribute to the measured SER, motivating dedicated studies in SENSEI sensors. 
+More recent measurements performed at LAMBDA Laboratory at the University of Buenos Aires on a CCD fabricated from the same wafer as science-grade SENSEI CCDs~\cite{Brusco:2025kus} suggested that current analysis strategies may already account for charge deferred by these traps. 
+However, because of these measurements were taken at the surface, high rates of environmental and cosmic backgrounds limited the sensitivity to a restricted range of trap lifetimes. 
+In order to probe very long-lived traps (traps that emit electrons several days or even months after the initial trapping) at the usual operating temperature of $\sim135$~K, it is necessary to take longer pumping measurements at higher operating temperatures, which must be done in a shielded underground environment. 
+In this work we describe such a measurement, which we perform with SENSEI CCDs $\sim100$~m underground in the MINOS cavern at Fermi National Accelerator Laboratory (FNAL).
 
 
-The measurement procedure was as follows: for a given temperature, charge-generating shifts were performed as described above to uniformly illuminate the CCD with charge. Then the pocket-pumping protocol was performed with with $N_{\text{pumps}}=3000$ to obtain well-defined non-saturated dipoles for various $t_{ph}$. At a given temperature $t_{ph}$ was varied from approximately $5\times 10^{-5}$s to 1.03~s.  Only one skipper sample was taken to speed up readout time. Temperature was varied from \myrange{125}{210}{\kelvin} with 18-25 images at each temperature. We specifically took longer $t_{ph}$ measurements at higher temperatures to maximize sensitivity to longer trap emission times.
+The Skipper-CCDs used in this study are made of high-resistivity silicon with an active area of $6144\times1024$ pixels, each of size 15 $\times$ 15 $\mu$~m. 
+Each pixel is covered by three overlapping gates (called ``clocks'' or ``phases'') which are held at different voltages to create a potential well for charge. 
+These voltages are clocked between high and low states in sequence to transfer charge from pixel to pixel. 
+Our CCDs are p-channel devices and therefore charge carriers are holes and not electrons. 
+We refer to these holes as electrons below. 
+During readout charge in pixels of the active region is shifted row-by-row to a serial register and then read out one column at a time in the floating gate amplifier, which performs the Skipper readout step. 
+The CCD has four readout amplifiers that each read out in parallel a ``quadrant'' of 512 rows by 3072 columns. 
+The CCD was operated in a vacuum chamber equipped with a vacuum pump and a cryocooler, and then read out with a Low-Threshold-Acquisition board (LTA)~\cite{LTA}.
 
-\section{Trap Characterization}
+In \cref{sec:identification} we describe the measurement protocol for identifying trap candidates, and in \cref{sec:characterization} we apply selections to remove poor-quality traps and characterize the energy, cross-section, and lifetime of our well-behaved trap population. 
+In \cref{sec:completeness} we perform a data-driven study to estimate the completeness of the measurement. 
+In \cref{sec:simulation} we detail a full readout simulation using the high-energy event spectrum observed in MINOS to test the impact of the observed trap distribution on the SER. 
+Finally, we conclude in \cref{sec:discussion} with a summary of the impact of the trap density on single-electron backgrounds in SENSEI.
+
+
+\section{Pocket-Pumping Measurements}
 \label{sec:identification}
-The dipole intensity depends on $N_{\text{pumps}}$, $t_{ph}$, the probability of capturing a charge carrier $P_c$ and the probability of emitting a charge carrier $P_e$~\cite{PhysRev.87.835,trapsOscura,HallPc}. $P_c$ acts a s a scaling factor that varies with temperature, and $P_e$ can be expressed as a function of the emission characteristic time $\tau_e(T)$. This gives:
+
+In order to search for individual traps in this study we make use of the pocket-pumping technique described in detail in~\cite{hall_situ_2017,trapsOscura}.
+This method requires an approximately flat field of charge in the active area of the CCD. 
+We do not use an external light source to uniformly illuminate the CCDs used in the study. 
+Instead we make use of a pumping technique described in~\cite{wu_characterization_2026}. 
+In particular we use ``pixel-pumping,'' where a controlled amount of spurious charge is generated in the active area by clocking the vertical gate voltages to shift charge back and forth from pixel to pixel. 
+In this work we used a voltage swing of 10~V and 100,000 shifts to generate approximately $2000~e^-$ of charge per pixel, which serves as the flat field of charge for pocket-pumping. 
+After generating this flat field, we perform asymmetric pixel pumps between the three pixel phases with varying phase times. 
+If a trap is present in an edge phase, charge may be captured, released later, and spill into the neighboring pixel; repeating this cycle for a phase near the trap resonance produces a ``dipole'' signal relative to the uniform background. 
+We refer to our edge phases as $\phi_1$ and $\phi_3$, and $\phi_2$ is the phase under which charge is held during an exposure.
+
+The number of charge carriers trapped and released by pocket-pumping manifests as the intensity of the dipole ($I_{t_{ph}}$), which is defined as half the difference in charge between the two pixels. 
+This can be modeled using Shockley-Read-Hall theory~\cite{PhysRev.87.835,PhysRev.87.387}, where $I_{t_{ph}}$ depends on the probability of capture $P_c$, the trap "effectiveness" or "depth" $D_t$, and the emission probability $P_e$. $P_c$ acts as a scaling factor that varies slightly with temperature, and $P_e$ can be expressed as a function of the emission characteristic time $\tau_e(T)$~\cite{trapsOscura}. 
+The pumps are asymmetric with a short delay time $t_{ph}$ and a longer delay time $7 t_{ph}$ (chosen to maximize the trap intensity and minimize the pumping sequence time; see~\cite{trapsOscura}). This gives:
 
 \begin{align}\label{eq:I_fit}
     \mathrm{I(t_{ph}) =N_{pumps}D_t P_c \left(e^{-\frac{t_{ph}}{\tau_e}}-e^{-8\frac{t_{ph}}{\tau_e}}\right)}
 \end{align}
 
 
-Trap identification is performed using the same algorithm described in~\cite{Brusco:2025kus}. Once a trap is identified it was logged in each image taken at the same temperature, obtaining its intensity for each $t_{\text{ph}}$. For images taken at a given temperature ($T$) the intensity $I(t_{\text{ph}})$ of an identified trap for various delay times $t_{\text{ph}}$  can be plotted to predict the trap's emission time constant $\tau_e(T)$. If a trap only appears at one $t_{\text{ph}}$ value it is ignored. 
+The measurement procedure was as follows: for a given temperature, charge-generating shifts were performed as described above to uniformly illuminate the CCD with charge. 
+Then the pocket-pumping protocol was performed with $N_{\text{pumps}}=3000$ to obtain well-defined non-saturated dipoles for various $t_{ph}$. 
+At a given temperature, $t_{ph}$ was varied from approximately $5\times 10^{-5}$~s to 1.03~s. 
+Only one skipper sample was taken to reduce readout time. 
+Temperature was varied from \myrange{125}{210}{\kelvin} with 18--25 images at each temperature. 
+We specifically took longer $t_{ph}$ measurements at higher temperatures to maximize sensitivity to longer trap emission times. 
+The exact pumping sequence is the same as described in~\cite{Brusco:2025kus}.
 
-Fits are then performed according to \cref{eq:I_fit} for the identified traps. Following this criteria 60,029 dipoles are identified associated with 5171 traps. We analyze as before the spatial distribution of these identified traps using toy Monte-Carlo simulations. $10^4$ simulations were performed under the assumption of spatial uniformity. \cref{fig:trap_distribution} shows the histogram of the distances between all identified traps per quadrant, along with the simulation result and its corresponding 90\% confidence band assuming the traps are distributed uniformly. Some deviation from uniformity is expected due to the spatially localized nature of the cause of traps (defects in the CCD,  high energy events, etc), but in general we see good agreement with this simulation. 
+Dipoles are identified with an algorithm similar to the one described in~\cite{Brusco:2025kus}. 
+For each row of the CCD we subtract the median charge and multiply it with the previous row. 
+If a dipole is present, this computation yields a negative value. We require the magnitude of this intensity to be greater than $3\sigma$, where $\sigma$ is the noise level of the pixel estimated through median absolute deviation. 
+The median is used here to increase the number of possible candidates; otherwise, outliers could suppress genuine traps. 
 
-\begin{figure}[!htb]
-    \centering
-    \includegraphics[width=\linewidth]{../figures/trap_distribution.pdf}
-    \caption{Probability density of the distance between all identified traps, combining all four quadrants. The red curve and shaded band show the mean and 90\% confidence interval from $10^4$ toy Monte-Carlo simulations assuming a spatially uniform trap distribution. We see good agreement between the simulation and the data.}
-    \label{fig:trap_distribution}
-\end{figure}
-
-
-A trap is identified as ``good'' if it meets the following criteria. First, the trap maximum intensity must be greater than 3$\sigma$, where $\sigma$ is the square root of the variance of the charge in the surrounding $35 \times 35$ pixels (trap should be bright enough). Second the relative error on the fit $\tau$ must be less than 50\% and the maximum of the intensity should be greater than three times the error on the intensity (the error bars shouldn't be too big.). Third, the p-value associated with the$\chi^2$ goodness of fit test should be greater than 0.05. Following this selection, 3379 traps are identified as ``good''. 
-
+We then log each such trap candidate for each $t_{ph}$ value for a single temperature and discard traps that only appear in a single image. 
+This then forms a trap candidate catalog containing intensity $I$ per $t_{ph}$ per temperature. 
+Uncertainties on this intensity measurement come from two sources added in quadrature: the first being the Poisson noise of the pixel and the second from a baseline noise estimate. 
+The latter is measured from 4000 randomly chosen trap-free pixel pairs per temperature per quadrant: for each pair, the charge in the same two pixels is subtracted across every image in the $t_{ph}$ scan at that temperature, and $\sigma_{\rm base}$ is the median across pairs of the resulting per-pair standard deviation, divided by $\sqrt{2}$ to recover the single-read noise floor (varies from $30$--$40~ e^-$ at colder temperatures to $\sim80~e^-$ at higher temperatures). 
+We find 9333 trap candidates.
 
 
-\ansh{should we talk about some of the bad traps we saw?}
+\section{Trap Characterization}
+\label{sec:characterization}
 
+The trap candidates for a given temperature are then fit with \cref{eq:I_fit} plus a pedestal term $I_0$. 
+This accounts for a $t_{ph}$-independent dipole component that we observe at the trap coordinates in data, which grows from a negligible level at 150~K to $\mathcal{O}(700)\,e^-$ above 175~K. 
+Inspection of the raw images shows that it corresponds to a charge deficit in the trap pixel with the compensating charge deferred along the readout direction, while the summed charge of the pixel pair remains at the background level; it is therefore not a hot (generating) pixel but deferred charge produced by the trap itself acting on the dark-current background as charge packets are clocked through its physical location during readout. 
+Because the readout sequence is identical in every image of a $t_{ph}$ scan, this component is constant across the scan and is cleanly absorbed by $I_0$, leaving the pumped term unbiased. 
+Omitting $I_0$ causes the $\chi^2$ goodness-of-fit test to reject bright trap curves above $\sim$165~K, where the pedestal exceeds the per-point noise.
 
-\section{Trap temperature dependence and energy}\label{sec:analysis}
-For a given charge trap we model the emission time $\tau_e$ as a function of lattice temperature $T$, the thermal velocity of the charge carriers $v_{th}$, the effective density of states in the conduction band $N_c$, the trap energy $E_c$ and the trap cross-section $\sigma$~\cite{PhysRev.87.835,trapsOscura,HallPc,Brusco:2025kus}. This gives:
+We then select trap candidates with a fitted pump strength $\ge3$ times the fit uncertainty. 
+We evaluate the goodness of fit using a $\chi^2$ test statistic. 
+To select a good-quality trap we require $\Delta \chi^2$, defined as $\chi^2_{\text{flat\,fit}} - \chi^2_{\text{intensity\,fit}}$ to exceed a temperature-dependent threshold chosen such that 0.1\% of pure noise locations would pass this selection. 
+This threshold is determined with a calibrated detection table built by sampling thousands of trap-free pixel pairs ($\sim2000$ per quadrant), running the identical trap intensity fits and then computing $\Delta \chi^2$ for every temperature.
+
+This fit provides $\tau_e(T)$ for every trap at a given temperature. 
+To identify traps that follow our model, we perform these fits for a trap candidate at multiple temperatures. 
+If a trap does not have good intensity fits for four different temperatures, it is discarded, resulting in a reduction of trap candidates to 4711. 
+Traps that are lost in the intensity fit process are rejected mostly due to not following the model (flat at all $t_{ph}$) or having a maximum intensity out of range of the $t_{ph}$ measurement range. 
+We also notice traps ($\sim400$) that switch orientation and have opposite sign intensity fits for some but not all temperatures, which are indicative of dual-response traps. 
+We discard these traps, and this reduces the candidate count to 4304 traps.
+
+For a given charge trap we model the hole emission time $\tau_e$ as a function of lattice temperature $T$, the thermal velocity of the charge carriers $v_{th}$, the effective density of states in the valence band $N_v$, the trap depth above the valence-band edge $E_t-E_v$, and the trap cross-section $\sigma$~\cite{PhysRev.87.835,trapsOscura,HallPc,Brusco:2025kus}. 
+Defining $E_{\mathrm{trap}}\equiv E_t-E_v$, this gives:
 
 \begin{align}\label{eq:tau(T)}
-    \mathrm{\tau_e = \frac{1}{\sigma v_{th}N_c}e^{\frac{E_t}{k_B T}}},
+    \mathrm{\tau_e = \frac{1}{\sigma v_{th}N_v}e^{\frac{E_{\mathrm{trap}}}{k_B T}}},
 \end{align}
-where the temperature dependent $v_{th}$ and $N_c$ are defined as
+where the temperature-dependent $v_{th}$ and $N_v$ are defined as
 
 \begin{align}
     \mathrm{v_{th} = \sqrt{\frac{3k_B T}{m_{cond}}}~~~and~~~
-    N_c = 2 \left[ 2\pi m_{dens} \frac{k_B T}{h^2}\right]^{3/2}}.
+    N_v = 2 \left[ 2\pi m_{dens} \frac{k_B T}{h^2}\right]^{3/2}}.
 \end{align}
-\noindent here, h is the Plank's constant, $\mathrm{m_{cond} \simeq 0.41\,m_e}$ and $\mathrm{m_{dens} \simeq 0.94\,m_e}$ are the holes effective mass for conductivity and density of states respectively between 100 and 200\,K~\cite{GreenCon}, and $\mathrm{m_e}$ is the electron mass at rest.
 
+\noindent Here, $h$ is Planck's constant, $\mathrm{m_{cond} \simeq 0.41\,m_e}$ and $\mathrm{m_{dens} \simeq 0.94\,m_e}$ are the hole effective masses for conductivity and density of states, respectively, between 100~K and 200~K~\cite{GreenCon}, and $\mathrm{m_e}$ is the electron rest mass.
 
-For the traps identified as ``good,'' we further track the intensity fits for the same trap across different temperatures. By fitting all of these curves with \cref{eq:I_fit}, we can obtain $\tau_e$ for each trap as a function of the temperature T. This allows us to fit these measurements with \cref{eq:tau(T)}. We then mark a trap as ``well-behaved'' if they are within our analysis range, namely if they have at least four good temperature fits. Traps that do not satisfy this criteria either have behavior that does not match our model, or (more often) have emission time peaks that are either much shorter or much longer than the tested range. This further narrows down our total number of analyzed traps to 2121 ``well-behaved'' traps. An example of a well-behaved trap is shown in \cref{fig:good_trap}. 
-
-
+For each trap candidate, we track the intensity fits across all temperatures. We then fit these measurements with \cref{eq:tau(T)}, and reject traps that have a reduced $\chi^2 > 10$. This results in a final characterized trap count of \ntraps traps. An example is shown in \cref{fig:good_trap}. 
 
 \begin{figure}[!htb]
     \centering
     \includegraphics[width=\linewidth]{../figures/example_trap_3.pdf}
-    \caption{An example of a well characterized charge trap in quadrant 1 of our CCD is shown. The \textbf{top} figure shows the intensity (in units of electron charge) vs $t_{ph}$ with error bars and the fit according to~\cref{eq:I_fit}. The \textbf{bottom} plot shows the temperature vs the fitted $\tau_e$ for the same trap with the fit line from~\cref{eq:tau(T)} The points are colored by temperature.}
+    \caption{An example of a characterized charge trap in quadrant 1 of our CCD is shown. The \textbf{top} panel shows the intensity (in units of electron charge) as a function of $t_{ph}$ fitted according to~\cref{eq:I_fit}. The \textbf{bottom} panel shows $\tau_e$ as a function of temperature for the same trap with the fit line from~\cref{eq:tau(T)}. The points are colored by temperature. Here the pedestal has been removed and the magnitude of the intensity is plotted.}
     \label{fig:good_trap}
 \end{figure}
 
 
-We then fit according to \cref{eq:tau(T)} to find the energy and cross-section for these well-behaved traps.  We also observe two distinct populations. The first corresponds to the usual energies of standard defects $\sim0.2\,$eV (such as the $V_2$ vacancy~\cite{Wood_2014}), which we refer to as ``Group A'' ($\sim200$ traps)  and a second that peaks around $\sim0.5\,$eV, which we term ``Group B'' ($\sim50$ traps). This higher energy population was not previously accessible with the pocket-pumping technique.  As a reminder, the motivation of this work is to study the predicted backgrounds from charge traps at standard operating temperatures ($\sim$135~K), and of particular interest are the traps with very long emission times at such low temperatures. To study this region in particular, we took more measurements at high temperatures to extrapolate the emission time of these traps at low temperatures. \Cref{fig:all_traps} shows all of our energy and cross-section fits. The shaded gray region begins where we no longer have direct measurements of $\tau_e$ for any trap, all lines in this region are extrapolated from fitting with \cref{eq:tau(T)}. The white region denotes the measured trap emission times. The longer delay times and high temperature measurements done underground at MINOS allow us to probe significantly higher energies and cross-sections than were accessible previously~\cite{Brusco:2025kus}.
+
+We analyze the spatial distribution of these identified traps using toy Monte-Carlo simulations. 
+$10^4$ simulations were performed under the assumption of spatial uniformity. \cref{fig:trap_distribution} shows the histogram of the distances between all identified traps per quadrant, along with the simulation result and its corresponding 90\% confidence band assuming the traps are distributed uniformly. 
+Some deviation from uniformity is expected due to the spatially localized nature of the source of traps (defects in the CCD,  high-energy events, etc.), but in general the characterized trap population is uniformly distributed.
+
+
+\begin{figure}[!htb]
+    \centering
+    \includegraphics[width=\linewidth]{../figures/trap_distribution.pdf}
+    \caption{Probability density of the distance between all characterized traps, combining all four quadrants. The red curve and shaded band show the mean and 90\% confidence interval from $10^4$ toy Monte-Carlo simulations assuming a spatially uniform trap distribution. We see good agreement between the simulation and the data.}
+    \label{fig:trap_distribution}
+\end{figure}
+
+
+
+We then calculate the energy and cross-section of the characterized trap population, which is presented in \cref{fig:all_traps}. 
+The shaded gray region begins where we no longer have direct measurements of $\tau_e$ for any trap; all lines in this region are extrapolated from fitting with \cref{eq:tau(T)}. 
+The white region denotes the measured trap emission times. The longer delay times and high-temperature measurements done underground at MINOS allow us to probe significantly higher energies and cross-sections than were accessible previously~\cite{Brusco:2025kus}. 
+We observe a large population centered around 0.2~eV and a smaller secondary population centered around 0.4--0.5~eV, which we dub the ``high-energy'' population. 
+The latter population was not previously accessible with the pocket-pumping technique. %
+
 
 \begin{figure}[!htb]
     \centering
     \includegraphics[width=\linewidth]{../figures/characterized_traps.pdf}
-    \caption{All 2121 well-characterized traps, colored by observational group (A (pink): (measured above 170~K), B (blue): measured between 130-170~K,  and C (yellow): measured below 130~K). \textbf{Top}: Emission time $\tau_e$ as a function of temperature. Solid portions of each line indicate temperatures at which the trap was directly measured; the shaded gray region marks the extrapolated regime where no trap has a direct measurement at any temperature. The dashed vertical line marks the SENSEI@SNOLAB operating temperature of 135~K. \textbf{Bottom}: Fitted trap energy $E_t$ vs.\ capture cross-section $\sigma$ for the same traps.}
+    \caption{All \ntraps\;characterized traps, colored by observational group: High Energy (red; measured above 170~K) and Main Population (blue; measured between 120--170~K). \textbf{Top}: Emission time $\tau_e$ as a function of temperature. Solid portions of each line indicate temperatures at which the trap was directly measured; the shaded gray region marks the extrapolated regime where no trap has a direct measurement at any temperature. The dashed vertical line marks the SENSEI@SNOLAB operating temperature of 135~K. \textbf{Bottom}: Fitted trap energy $E_t$ versus capture cross-section $\sigma$ for the same traps.}
     \label{fig:all_traps}
 \end{figure}
 
 
-These fits were then used to predict the characteristic emission times for all well-behaved traps at 135~K, the typical operating temperature of SENSEI@SNOLAB~\cite{SENSEI:2023zdf}. This is shown in the top panel of \cref{fig:taue}. Here we see that we begin to measure some of the traps population with $\tau_e>1$~s, however a majority of the traps with longer delay times are extrapolated from observing these traps at high temperatures. We see that this distribution agrees with results from~\cite{Brusco:2025kus}. \ansh{should we say something about the shape of the distribution?}
+We then use \cref{eq:tau(T)} to extrapolate the characteristic emission times for all characterized traps at 135~K, the typical operating temperature of SENSEI@SNOLAB~\cite{SENSEI:2023zdf}. 
+Not all traps have direct $\tau_e$ measurements at every temperature. 
 
-Not all traps have direct $\tau_e$ measurements at every temperature. At a given temperature $T$, a trap's emission time is classified as \textit{measured} if for a given temperature there were enough measured values in the $t_{\text{ph}}$ range that $\tau_e$ was successfully fit at that temperature, and as \textit{extrapolated} if $\tau_e(T)$ is obtained solely from the fit to \cref{eq:tau(T)}. One can immediately see from the overlap between the measured and extrapolated trap emission times that there is some inefficiency of measuring a given trap. To understand why this inefficiency was taking place and to account for populations of traps that were not characterized at any temperature we perform a detailed data driven toy Monte-Carlo study. 
 
-% We define the measurement efficiency $\varepsilon(\tau)$ as the fraction of trap emission times with a direct measurement in a given $\tau$ bin, pooled across all traps and all temperatures. This is shown in the bottom panel of \cref{fig:taue}. The efficiency reaches near unity for $\tau \sim 0.3$--1~s, reflecting the upper end of the $t_{\text{ph}}$ range, and falls to near zero for very short ($\tau \lesssim 10^{-5}$~s) and very long ($\tau \gtrsim 10^{3}$~s) emission times that lie outside our measurement window. This demonstrates that traps are only reliably measured within a particular range of $t_{\text{ph}}$.
+\section{Measurement Completeness}
+\label{sec:completeness}
 
-% To test for traps that may have been missed due to measurement inefficiency, one can apply an efficiency correction to the $\tau_e(135~\text{K})$ histogram. For each trap, we do this by using evaluating the interpolated efficiency function $\varepsilon(\tau_e)$ for $\tau_e$ at the trap's mean measurement temperature. This allows us to scale the corresponding bin count by the inverse efficiency. We construct a conservative 90\% CL upper estimate of the trap population in each $\tau_e$(135~K) bin by applying a Poisson upper limit to the raw count and dividing by the measurement efficiency. The efficiency-corrected estimate and 90\% CL upper limit are shown in Fig.~\ref{fig:taue_upper_limit}, and are used as inputs to the simulation described in Section~\ref{sec:simulation}.
+At temperature $T$, a trap's emission time is classified as \textit{measured} if the intensity was successfully fit at that temperature and as \textit{extrapolated} if the emission time is obtained solely from the fit to \cref{eq:tau(T)}. 
+To account for possible inefficiencies in measuring a given trap and to account for populations of traps that were not characterized at any temperature, we perform a detailed data-driven toy Monte-Carlo study.
+ 
+ 
+First, noise samples were built using the trap-free portions of the images in the data set for each temperature and clock time $t_{ph}$. The pedestal term $I_0$ was also included by drawing from the measured per temperature distribution. 
+Next,  fake intensity curves following \cref{eq:I_fit} were built using a grid of amplitudes, where the amplitude is defined as $A = N_{\text{pumps}}\,D_t \, P_c$. The grid purposefully spans over a range far beyond the range observed in data ($200$--$15{,}000~e^-$).
+These intensity curves were then injected into the noise samples with the corresponding uncertainties determined by the same procedure described in \cref{sec:identification}.
+This allowed us to reproduce the signal structure and fluctuations of real intensity curves for a synthetic set.
+We then combine the $\tau_e$ grid with an energy grid ($0.04$--$0.7$~eV) to form a 2D set. 
+For a given set point we can use \cref{eq:tau(T)} to obtain $\tau_e$ at all temperatures. 
+We then interpolate the injection-recovery grid to determine $p_{\rm det}(T,\tau_e(T),A)$. 
+For a fixed amplitude we combine those 23 unequal probabilities with a Poisson-binomial tail. $P(\mathrm{at\ least\ 4\ good\ fits}) = P\left(\sum_{i=1}^{23}\mathrm{Bernoulli}(p_i)\ge4\right)$. 
+We then marginalize this over the empirical trap amplitude. This is done by factoring out the $N_{\text{pumps}}$ term and then characterizing the trap depth $D_t$ and $P_c$ for all temperatures. 
+$D_t$ ranges from 0.2 to 1.2 and is independent of temperature. 
+$P_c$ is temperature-dependent; it is close to $\sim1$ for $T<180$~K but drops logarithmically to 0.78 at 210~K. 
+This amplitude is averaged over $D_t$ and is scaled by the temperature-dependent $P_c$. 
+This results in a 2-D probability distribution $P(\mathrm{characterized}\mid\tau_{135},E)$, shown in \cref{fig:measurement_probability_grid}. 
+ We validated this grid against our characterized population and found that 99.79\% of characterized traps lie in regions with $P_{\text{characterized}}>0.8$. 
 
-\begin{figure}[!htb]
+
+
+
+\begin{figure}
     \centering
-    \includegraphics[width=\linewidth]{../figures/tau_at_135k_hist.pdf}
-    % \subfigure{\includegraphics[width=\linewidth]{../figures/efficiency_tau_curve.pdf}\label{fig:efficiency}}
-    \caption{\textbf{Top}: Histogram of the predicted emission time $\tau_e$ at 135~K for all 2121 well-characterized traps. Green bars indicate traps for which $\tau_e$ was directly measured; blue bars indicate traps extrapolated using \cref{eq:tau(T)}. Vertical lines mark 1~hour, 1~day, and 1~year. \textbf{Bottom}: Measurement efficiency $\varepsilon(\tau_e)$, defined as the fraction of trap emission times with a direct measurement in a given $\tau_e$ bin, pooled across all traps and all temperatures.} %Error bars reflect binomial uncertainty.
-    \label{fig:taue}
+    \includegraphics[width=\linewidth]{../figures/prob_of_measuring.png}
+     \caption{Results of the data-driven sensitivity study are plotted alongside the actual energies and emission timse of the characterized traps. The darker colors correspond to high detection probability, and the lighter colors show where this measurement is not sensitive. As expected, most of the characterized traps fall in the high probability region.}
+     \label{fig:measurement_probability_grid}
 \end{figure}
 
-% \begin{figure}[!htb]
-%     \centering
-%     \includegraphics[width=\linewidth]{../figures/tau_at_135k_hist_upper_limit.pdf}
-%     \caption{Estimated trap population at 135~K accounting for measurement efficiency. Blue bars show the raw known trap counts; red bars show the efficiency-corrected estimate obtained by dividing each bin by $\varepsilon(\tau)$ at the trap's mean measurement temperature; the hatched region shows the 90\% CL upper limit, derived from the Poisson upper limit on the raw counts divided by the same efficiency. Vertical lines mark 1~hour, 1~day, and 1~year.}
-%     \label{fig:taue_upper_limit}
-% \end{figure}
 
+Interestingly, the presence of traps near the low-probability border implies a hidden population of long-lived traps much larger than the observed set. 
+We average this probability distribution over the energy distribution of observed traps under the assumption that the hidden trap population has an energy distribution similar to the observed population. 
+This collapses the measurement probability into an effective efficiency of measurement as a function of trap emission time. 
+This is shown in \cref{fig:eff_completeness} along with the observed distribution of $\tau_e$ at the SENSEI operating temperature of 135~K. 
+This demonstrates that traps are only reliably characterized within $10^{-3}~\text{s}\lessapprox \tau_e \lessapprox10^4~\text{s}$. 
+It is worth emphasizing that this efficiency assumes that hidden traps have energy and amplitude distributions similar to those actually characterized, and makes no statement about traps that do not follow our model.
+If one were to relax this assumption, for example, by positing hidden traps are twice as faint, then the missed trap population would be inflated by a factor $\sim2$.
 
-\section{Simulating Trap Emission}\label{sec:simulation}
-
-To investigate the effect of these traps on our single-electron rate, an end-to-end simulation architecture capable of simulating SENSEI conditions was developed. A CCD is initialized with a given charge trap density (5171 traps / 6144 $\times$ 1024 pixels) and a given exposure-dependent and independent single-electron rate taken from SENSEI results~\cite{SENSEI:2024yyt}. Only one quadrant is simulated (3072 columns $times$ 512 rows). The traps themselves are randomly placed throughout the quadrant.  Each charge trap is assigned an emission time $\tau_e$ sampled from the distribution shown in \cref{fig:taue}.
-For this work we take the exposure-dependent rate to be $4.36\times10^{-5}~e^-$/pix/day, and the exposure independent rate as $9.94\times10^{-5}~e^-$/pix/image. A ``fake'' image can then be taken for a given exposure. This randomly inserts single electron events calculated from a poissonian fluctuation around the predicted number of single electron events from the exposure-independent and exposure dependent rates. Then high energy events (referring to the actual event and a surrounding 60~pix radius) are sampled from a reference 20~h exposure SENSEI@MINOS image and then randomly placed in the simulated image. The number of high energy events is scaled linearly with exposure; for a 4~h image, a random 1/5 selection of the total high energy events are injected.  Then readout is simulated row by row with delay times corresponding to the actual time it takes to read out a full unbinned image. Trap interactions during each row-transfer dwell $dt$ follow two-state Shockley--Read--Hall kinetics: a trap captures a carrier from the charge packet above it at rate $\lambda_c = q\,\sigma v_{th}/V_p$, where $q$ is the packet occupancy, $\sigma$ the trap cross-section (sampled jointly with $\tau_e$ from the measured population), and $V_p$ the effective volume explored by a single carrier confined in the pixel well, and emits at rate $\lambda_e = 1/\tau_e$. Emitted carriers may be recaptured by the same trap before the packet is shifted away, so the trap state after each transfer is drawn from the exact two-state transition probabilities, $P_{\mathrm{release}} = \frac{\lambda_e}{\lambda_e+\lambda_c}\left(1-e^{-(\lambda_e+\lambda_c)\,dt}\right)$ and analogously for capture. We take $V_p = 3~\mu\mathrm{m}^3$ as the baseline, motivated by the collecting-phase area times the thermal vertical spread of a single carrier in the buried-channel well at 135~K; since inter-phase barriers far exceed $k_BT$ even at the small clock swings used in operation, $V_p$ is set by the well geometry rather than the clock amplitude. \ansh{numbers and figures in this section need to be regenerated with the updated trap interaction model (recapture) and a $V_p$ systematic variation} We assume unbinned SENSEI readout mode, where the total time to read out an image is $\sim$7~hours. Traps are allowed to remain trapped in one image and emit in future images. A single trial refers to an initialized CCD where a sequence of 5 images at exposure times of 0~h, 4~h, 6~h, 10~h, and 20~h is repeated 100 times, for a total of 500 images per trial. After images are taken, we apply a set of masks developed in previous analyses~\cite{Sensei2020,SENSEI:2023zdf,SENSEI:2024yyt}. We specifically apply the halo mask (60 pixel radius around pixel with $>100e^-$), vertical bleed mask (all pixels above pixel with $>100e^-$ are masked) and the hot column and hot pixel masks. As the latter two are data driven, to avoid truncation bias an A/B strategy is implemented, where half the simulation set is designated as set A, and the other half as set B. The set B statistics are used to decide the hot columns and pixels in A, and vice versa. 
-
-After masking, the single electron densities are calculated for all exposures. They are then fit to obtain exposure-independent and exposure-dependent rates. To obtain sufficient statistics we take 500 such trials, resulting in 250,000 images. The simulation is run under two sets of observational conditions: MINOS conditions, corresponding to the environment of this study, and SNOLAB conditions, which assume a factor of 10 fewer high-energy events per exposure to reflect the greater overburden at SNOLAB~\cite{SENSEI:2023zdf}. For MINOS conditions using only the raw measured traps we find that with all masks applied the effect of traps on the exposure-independent rate is an increase of $\sim1.6\times10^{-7}$~$e^-$/pix/image, and the effect on the exposure-dependent rate is an increase of $1\times10^{-7}$~$e^-$/pix/day. The latter is consistent with zero within the simulation's statistical uncertainty, and the former is quite small. This can be seen in \cref{fig:minos_sim}.
-
-\begin{figure}[!htb]
+\begin{figure}
     \centering
-    \includegraphics[width=\linewidth]{../figures/minos_conditions_sim_results.pdf}
-    \caption{\textbf{Top:} Single-electron density as a function of exposure time under MINOS conditions, averaged over 500 trials. Red and blue points show the fitted exposure-independent and exposure-dependent rates with and without traps respectively; the dashed line shows the injected truth. The bottom panel shows the per-exposure difference between the with-trap and without-trap fits. The effect of traps on the exposure-independent rate is $\sim$$2\times10^{-7}$~$e^-$/pix/image, and the effect on the exposure-dependent rate is negligible.\textbf{Bottom:} The difference between the simulation with trap effects and the simulation without trap effects is shown. The effect is roughly proportional to exposure, with the 0 hour exposure slightly inflated due to the ordering of the measurement protocol.}
-    \label{fig:minos_sim}
+    \includegraphics[width=\linewidth]{../figures/efficiency_completeness.pdf}
+    \includegraphics[width=\linewidth]{../figures/tau_at_135k_hist_efficiency_combined.pdf}
+     \caption{ \textbf{Top}: Histogram of the predicted emission time $\tau_e$ at 135~K for all \ntraps\;well-characterized traps. Green bars indicate traps for which $\tau_e$ was directly measured; blue bars indicate traps extrapolated using \cref{eq:tau(T)}. The probability of characterizing a trap at four temperatures for a given $\tau_e$ averaged over the observed energy distribution of characterized traps is shown in red. This defines an approximate measurement efficiency under the energy and amplitude assumptions discussed in the text. \textbf{Bottom}: The same trap distribution overlaid with the efficiency-corrected histogram in black and the efficiency-corrected Poisson 90\% upper-limit histogram in hatched lines. This predicts a substantial population of long-lived traps.}
+     \label{fig:eff_completeness}
 \end{figure}
 
-The simulation is additionally run using the 90\% CL upper limit trap distribution as the trap input, to bound the impact of uncharacterized traps. The results of all four scenarios — MINOS and SNOLAB conditions, each with the baseline and upper-limit trap distributions — are summarized in \cref{fig:results_comparison}. Across all scenarios, the effect on both the exposure-independent and exposure-dependent rates remains small. Under the upper-limit trap assumption, the largest shifts are $\sim2.2\times10^{-7}$~$e^-$/pix/image in the exposure-independent rate and $\sim4.2\times10^{-7}$~$e^-$/pix/day in the exposure-dependent rate, both below 1\% of the rate measured in~\cite{SENSEI:2024yyt}. We see that for SNOLAB conditions the increase is negligible for the exposure independent case, and roughly consistent with the MINOS results in the exposure dependent case. 
+
+
+
+
+\section{Simulating Trap Emission}
+\label{sec:simulation}
+
+To investigate the effect of these traps on our single-electron rate, an end-to-end simulation architecture capable of simulating SENSEI conditions was developed. 
+In the simulation, a ``CCD'' is initialized with a given charge trap density chosen to be the same as the characterized trap population (\ntraps\;traps / 6144 $\times$ 1024 pixels) and an exposure-dependent and exposure-independent single-electron rate taken from the MINOS UR quadrant in previous SENSEI results~\cite{SENSEI:2024yyt}. 
+The exposure-dependent rate is taken as $4.36\times10^{-5}~e^-$/pix/day and the exposure-independent rate is taken as $9.94\times10^{-5}~e^-$/pix/image. 
+For simplicity, only one quadrant is simulated (3072 columns $\times$ 512 rows). 
+The traps are then randomly placed throughout the quadrant with emission times drawn from the distribution of the characterized traps shown in \cref{fig:eff_completeness}. 
+We assume an equal distribution of traps under $\phi_1$ and $\phi_3$, all initialized as empty. Traps under the $\phi_2$ phase were not measured or simulated. %as these traps would behave qualitatively differently. $\phi_2$ is where charge is held during exposures and row-dwells during readout, and thus recapture of emitted charge occurs at a much higher rate.
+
+The simulation takes ``images'' by specifying an exposure time and injecting a number of single-electron counts randomly throughout the image based on Poisson fluctuations around the exposure-dependent and exposure-independent single-electron rates. 
+High-energy events must also be simulated in order to match science conditions and provide the mechanism for filling traps. 
+To simulate data-taking conditions, we sample a fraction of high-energy events (defined by choosing contiguous regions of positive charge with total charge $>100e^-$) from a 20~h SENSEI image taken at MINOS. 
+We ignore long horizontal streaks as these correspond to high-energy events that strike the serial register during readout. 
+For a chosen cluster we transplant all charge within a 60-pixel radius of pixels with charge $>100e^-$ into random non-overlapping positions in the image. 
+The number of high-energy events inserted in the image scales linearly with exposure; e.g. for a 4~h image, a random fifth of the total high-energy events are chosen. 
+To approximate SNOLAB conditions we scale down the number of high-energy events by a factor of 10 based on the high-energy background rate measured in~\cite{SENSEI:2024yyt}. 
+
+We then simulate readout row-by-row with delay times corresponding to two different data-taking procedures.
+The first simulates $32 \times 1$ binning as in SNOLAB Run 2~\cite{SENSEI:2024yyt} ($\sim13$~min readout), and the second assumes no binning as in SNOLAB Run 1~\cite{SENSEI:2023zdf} ($\sim7$~h readout). 
+Since we only model traps under the edge phase, traps can only capture charge during the phase overlap $dt\sim20~\mu$s of a row shift with probability $P_c = 1-e^{- dt q\,\sigma v_{th}/V_p}$ where $q$ is the packet occupancy, $\sigma$ the trap cross-section (sampled jointly with $\tau_e$ from the measured population), and $V_p$ the effective volume explored by a single carrier confined in the pixel well. 
+Filled traps then emit with probability $P_e = 1-e^{-\Delta t/\tau_e}$. 
+After an image is read out, we simulate the CCD clear used in operating conditions. 
+We evaluate the emission probability after each row transfer dwell during readout/clearing and after every exposure. 
+If emission occurs during vertical transfer we allow traps under $\phi_3$ only to recapture the emitted electron with the same probability described earlier. 
+
+The effective packet volume $V_p$ is estimated using the product of a single carrier's lateral and vertical extent inside the potential well of the pixel. 
+The lateral active-channel width between parallel channel stops is given by multiplying the channel-stop width $12~\mu\mathrm{m}$~\cite{wu_characterization_2026} by one third of the pixel pitch ($5~\mu\mathrm{m}$) as the three phases are equal width~\cite{Holland:2003}. 
+The vertical extent is estimated by the thermal (Boltzmann) spread of a carrier in the buried-channel potential well $\sigma_z=\sqrt{\varepsilon_{Si}k_BT/(q^2N_A)}\approx24$~nm using a channel doping $N_A\approx1.3\times10^{16}~\mathrm{cm}^{-3}$ obtained from the implant dose~\cite{Holland:2003} and buried-channel depth~\cite{wu_characterization_2026}. 
+This gives $V_p\approx1~\mu\mathrm{m}^3$, which we use as the representative value for our simulation. 
+
+A single trial refers to a single initialized CCD state in which 500 paired images (with and without traps, taken simultaneously) are taken and read out with shuffled exposure times of 0~h, 4~h, 6~h, 10~h, and 20~h.  
+After every image is read out, we simulate a 3~h clear as was used in prior science runs~\cite{SENSEI:2023zdf,SENSEI:2024yyt}. 
+After the images are taken we apply a set of masks developed in previous analyses~\cite{Sensei2020,SENSEI:2023zdf,SENSEI:2024yyt}. 
+We specifically apply the halo mask (60-pixel radius around a pixel with $>100e^-$), vertical bleed mask (all pixels above a pixel with $>100e^-$ are masked), and the hot column and hot pixel masks. 
+For the hot column mask, which is statistical, an A/B strategy is implemented, where half the simulation set is designated as set A, and the other half as set B. 
+The set B statistics are used to decide the hot columns and pixels in A, and vice versa. 
+This avoids truncation bias. 
+We then perform 200 such trials for binned and unbinned readout for both MINOS and SNOLAB conditions (800 total trials).
+
+
+After masking, the single-electron densities are calculated for all exposures. 
+They are then fit to obtain exposure-independent and exposure-dependent rates for images taken with and without traps. 
+The results are shown in \cref{fig:simulation_comparison}. 
+We see the no-trap branch recovers injected truth of the exposure-independent charge $<0.3\%$ and the exposure-dependent charge to within $<1.3\%$, providing a reasonable validaion of the framework. 
+We see that if traps match the characterized population then the effect on the SER is of order $10^{-7}$ and therefore is negligible compared to the single-electron rate. 
+For these images we see that the exposure-independent charge with traps is lower than the injected truth; this is because single-electron events rarely get trapped and are lost when they emit during the clear. 
+These results demonstrate that masking is effective for traps with relatively short emission times ($<100$~s), which constitute a majority of the characterized traps.
+
+
+\begin{figure}
+    \centering
+    \includegraphics[width=\linewidth]{../figures/simulation_comparison.pdf}
+    \caption{Exposure-independent (left) and exposure-dependent (right) rates for no-trap (blue) and trap (red) images for MINOS and SNOLAB science data-taking conditions. For the characterized population, differences are of order $\sim10^{-7}$, and therefore do not impact the SER.}
+    \label{fig:simulation_comparison}
+\end{figure}
+
+However, the results from the efficiency study imply a significant population of unmeasured traps with very long emission times. 
+To test the effect on the SER we ran the same simulation set on two populations. 
+The first was the efficiency-corrected trap population, calculated by dividing the trap count by the measurement efficiency plotted in \cref{fig:eff_completeness}. 
+The second was obtained by taking a Poisson 90\% confidence level upper limit on the trap counts, and then applying the same efficiency correction. 
+To prevent small weights from spuriously increasing the counts of the upper-limit-corrected population we restricted the bounds of the efficiency correction from $\tau_e\in [6\times10^{-5},5\times10^{7}]$. 
+The lower edge was defined by the extent of the completeness band and the upper edge was defined by requiring efficiency $\epsilon>0.001$. 
+We note that traps with emission times faster than the lower bound are irrelevant for masking as they emit nearly instantaneously. 
+For the upper bound we tested increasing the upper-limit correction to $10^8$~s and found the SER does not shift significantly; this is because these traps are too long-lived to contribute and largely act as sinks.
+When simulating the efficiency-corrected and upper-limit populations we increased the trap densities from the characterized trap density of $6.04\times10^{-4}$ to $2.34\times10^{-3}$ and $2.86\times10^{-3}$ respectively to account for the increase in counts. 
+
+To test the effect of these traps on the exposure-dependent rate, we ran the same simulation pipeline without injecting exposure-dependent charge for both conditions. 
+We draw a band between the efficiency-corrected population and the upper-limit population to define a plausible range for the exposure-dependent trap-driven charge excess.
+As seen in \cref{fig:results_comparison}, a hidden trap population could explain $\sim$25\%--55\% of the exposure-dependent SER in MINOS. 
+At SNOLAB we see that the lower boundary is close to 40\% and the upper boundary exceeds that of the measured exposure-dependent SER at SNOLAB. 
+MINOS is closer to the surface and has a higher background rate, so it is plausible the measured SER is a composite of charge traps and environmental backgrounds. 
+SNOLAB has a significantly lower rate of environmental backgrounds, and so traps could make up a larger fraction. 
+We note that current masking procedures seem to be ineffective for these long-lived trap populations. 
+
+There are several possible sources of uncertainty on these results. 
+The trap-driven excess arises from a relatively small number of traps, introducing a statistical uncertainty of $22\%$. 
+Overall systematic uncertainties include the choice of $V_p$, the two assumptions that hidden traps would have similar amplitude and energy distributions to the characterized population, and the choice to sample high-energy events from a single MINOS image. 
+The first was checked; varying $V_p$ by an order of magnitude in either direction results in shifts of order $\sim10^{-7}$ in this SER, and so the systematic uncertainty is relatively small. 
+For the second, as mentioned earlier, if hidden traps had fainter amplitudes then the hidden population would be biased larger; however, this would not hold for brighter amplitudes as these would be easier to detect. 
+We note the energy range assumption is supported by the traps characterized in the literature~\cite{pichler_intrinsic_2004,tavendale:2000,2019PSSAR.21600354M,trapsOscura}. 
+
+
 
 \begin{figure}[!htb]
     \centering
-    \includegraphics[width=\linewidth]{../figures/results_comparison.pdf}
-    \caption{Comparison of fitted single-electron rates across all four simulation scenarios. Filled (open) markers indicate MINOS (SNOLAB) conditions; red (blue) markers indicate simulations with (without) traps. Results are shown for both the baseline trap distribution (bottom two rows) and the 90\% CL upper limit (top two rows). The dashed vertical line marks the injected truth. \textbf{Top}: Exposure-independent rate. \textbf{Bottom}: Exposure-dependent rate.}
+    \includegraphics[width=\linewidth]{../figures/trap_bracket.pdf}
+    \caption{The band between the efficiency-corrected population (Eff. Corr) and the efficiency-corrected 90\% CL upper limit histogram is shown for the same data-taking conditions as SENSEI@SNOLAB and SENSEI@MINOS. We show the two populations to highlight the possible excess in the exposure-driven SER attributable to charge traps. The best-measured rate at MINOS (injected in the original simulation) is shown as a vertical red dashed line, and the golden quadrant result from~\cite{SENSEI:2024yyt} is shown as a blue vertical dashed line. This implies the effect of the traps on the SER could be significant, potentially explaining all of the exposure-dependent SER for SENSEI@SNOLAB.}
     \label{fig:results_comparison}
 \end{figure}
-
-As this was the same CCD as used to compare results in~\cite{SENSEI:2024yyt} we were able to directly test the impact of masking these traps on our measured $1e^-$ rate. We see that masking all 5171 detected traps had no significant impact on our $1e^-$ rate, supporting previous results suggesting that our masking procedures are effective at removing this background \ansh{though I guess it would only catch the ones that emit fast and therefore look like hot pixels}. Without masking the effective increase for MINOS conditions (MINOS conditions assuming the upper limit) is $\sim2\times10^{-5}~e^-$/pix/image (($\sim3\times10^{-5}~e^-$/pix/image)for the exposure independent rate and $4\times10^{-4}~e^-$/pix/day ($5\times10^{4}~e^-$/pix/day) for exposure dependent rate. This is a significant increase from the baseline, highlighting the effectiveness of masking in mitigating backgrounds from these effects. 
-
-
-\ansh{benchmark of the increase in 1e rate without masking from this background is missing for upper limit version, so i left those as blank parentheses above}
 
 
 
@@ -258,33 +417,40 @@ As this was the same CCD as used to compare results in~\cite{SENSEI:2024yyt} we 
 
 \section{Summary and outlook}\label{sec:discussion}
 
-In this work we characterized charge traps in a science-grade SENSEI Skipper-CCD operated underground in the MINOS cavern at Fermilab. We introduced a new technique for uniformly illuminating the CCD using spurious charge generated by symmetric clock swings, removing the need for an external light source. We then applied the pocket-pumping measirement technique over $125$--$210$~K and identified 5171 traps. We fully characterized a large fraction of these at very high temperatures and long swing, which was made possible by environmental shielding provided by the MINOS cavern. This allowed us to probe trap emission times of hundreds of days at the SENSEI@SNOLAB operating temperature of 135~K, a regime previously inaccessible.
+In this work we characterized charge traps in a science-grade SENSEI Skipper-CCD operated underground in the MINOS cavern at Fermilab. 
+Using the pocket-pumping measurement technique performed at 23 temperatures ranging from $125$--$210$~K, we identified \ntraps\;traps in the sensor. 
+These measurements allowed us to probe trap emission times of hundreds of days at the SENSEI@SNOLAB operating temperature of 135~K, a regime previously inaccessible.
 
-The characterized traps cluster predominantly at $\tau_e \sim 10^{-1}$--$10^{2}$~s at 135~K, with a tail extending to multi-day lifetimes. To bound the contribution of traps that fall outside our measurement window at all temperatures, we introduced a measurement efficiency $\varepsilon(\tau)$ pooled across all traps and temperatures, and derived a 90\% CL upper limit on the trap population in each $\tau$ bin. This provides a quantitative bound on the contribution of the uncharacterized population that complements the direct characterization.
+The characterized traps cluster predominantly at $\tau_e \sim 10^{-1}$--$10^{2}$~s at 135~K, with a tail extending to multi-day lifetimes. 
+To bound the contribution of traps that fall outside our measurement window at all temperatures, we introduced a measurement efficiency $\varepsilon(\tau)$ through a data-driven study of measurement completeness. 
+We obtained two efficiency-corrected trap populations, one by reweighting the characterized trap distribution and the other by applying the same procedure after taking the 90\% CL upper limit. 
+This provided a quantitative bound on the contribution of the uncharacterized population that complements the direct characterization.
 
-We tested both the directly-measured and the 90\% CL upper-limit trap distributions with an end-to-end CCD simulation under MINOS and SNOLAB conditions. With the standard SENSEI masking applied and under the upper limit assumption, the trap-induced shift in the single-electron rate is at most $\sim2\times10^{-7}$~$e^-$/pix/image in the exposure-independent component and $\sim4\times10^{-7}$~$e^-$/pix/day in the exposure-dependent component, in both cases below 1\% of the rate measured in the most recent SENSEI@SNOLAB analysis~\cite{SENSEI:2024yyt}. The shifts under SNOLAB conditions are $2$--$3\times$ smaller than under MINOS conditions, consistent with the picture that this background is sourced by charge from high-energy events being temporarily stored in traps and later released; deeper overburden suppresses the trap-mediated background alongside the primary one. This supports the conclusion of Ref.~\cite{Brusco:2025kus} that current masking strategies effectively mitigate this source of background.
+We tested the effects of these populations on the SER with a dedicated CCD simulation by injecting exposure-dependent and exposure-independent rates from the best MINOS quadrant in~\cite{SENSEI:2024yyt}. 
+The directly characterized population has a very small effect on the SER, producing excesses of order $10^{-7}$. 
+We also tested the efficiency-corrected and upper-limit populations in simulation without injecting any exposure-dependent rate. 
+This hidden population significantly increases the SER and can explain a large fraction of the observed SER in MINOS and SNOLAB.
 
-These results demonstrate the value of characterizing charge traps for single-electron-sensitive experiments, and will be especially relevant for upcoming large-scale efforts such as DAMIC-M and Oscura. The spurious-charge illumination technique demonstrated here is well-suited to characterize traps in all sensors of such experiments simultaneously, without dedicated test stands. Since the trap population is expected to depend on fabrication, repeating these measurements on each new sensor batch will be important. We delegate an investigation of the traps that did not meet our fit criteria to future work, and note that understanding these populations may further refine our picture of defect-induced backgrounds in skipper-CCDs.
+These results demonstrate the value of characterizing charge traps for single-electron-sensitive experiments, and will be especially relevant for upcoming large-scale efforts such as DAMIC-M and Oscura. 
+The spurious-charge illumination technique demonstrated here is well-suited to characterizing traps in all sensors of such experiments simultaneously, without dedicated test stands. 
+Since the trap population is expected to depend on fabrication, repeating these measurements on each new sensor batch will be important. 
+These results suggest, but do not prove, that a large fraction of the exposure-dependent single-electron rate could arise from a population of charge traps with very long emission times. 
+To test this conclusively, new techniques for probing these very long-lived traps must be explored.
+
 
 \begin{acknowledgments}
 We are grateful for the support of the Heising-Simons Foundation under Grant No.~79921. This document was prepared by the SENSEI collaboration using the resources of the Fermi National Accelerator Laboratory (Fermilab), a U.S. Department of Energy, Office of Science, Office of High Energy Physics HEP User Facility. Fermilab is managed by Fermi Research Alliance, LLC (FRA), acting under Contract No.~DE-AC02-07CH11359.
 The CCD development work was supported in part by the Director, Office of Science, of the DOE under No.~DE-AC02-05CH11231.
 The U.S. Government retains and the publisher, by accepting the article for publication, acknowledges that the U.S. Government retains a non-exclusive, paid-up, irrevocable, world-wide license to publish or reproduce the published form of this manuscript, or allow others to do so, for U.S. Government purposes.
 \end{acknowledgments}
-%We acknowledge the invaluable support of the public and free university system, curcial in this research. This work was supported by Fermilab under DOE Contract No. DE-AC02-07CH11359. The CCD development work was supported in part by the Director, Office of Science, of the DOE under No. DE-AC02-05CH11231. We are grateful for the support of the Heising-Simons Foundation under Grant No. 79921. %This manuscript has been authored by Fermi Research Alliance, LLC under Con- tract No. DE-C02-07CH11359 with the U.S. Depart-ment of Energy, Office of Science, Office of High Energy Physics. The United States Government retains and the publisher, by accepting the article for publication, acknowledges that the United States Government retains a non-exclusive, paid-up, irrevocable, world-wide license to publish or reproduce the published form of thismanuscript, or allow others to do so, for United States Government purposes.
 
 
-%\bibliography{apssamp}% Produces the bibliography via BibTeX.
-%\bibliographystyle{apsrev4-1-b.bst}
-%\bibliography{Compton.bib}
-
-%\appendix
 
 %\section{Appendixes}
+%\appendix
 %\bibliographystyle{apsrev4-1-b.bst}
 \bibliography{references.bib}
 %\bibliography{sensei.bib}
 
 \end{document}
 %
-% ****** End of file apssamp.tex ******

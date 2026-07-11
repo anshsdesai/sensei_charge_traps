@@ -1,0 +1,64 @@
+# Quarto project config for the SENSEI charge-trap lab notebook.
+#
+# Render with the project conda env active (it provides quarto + python + ipykernel):
+#     conda run -n sensei_charge_traps_new quarto render notebook
+# Preview with live reload:
+#     conda run -n sensei_charge_traps_new quarto preview notebook
+#
+# Output HTML lands in notebook/_site/ (git-ignored).
+
+project:
+  type: website
+  output-dir: _site
+  # Only render the notebook pages. Excludes sibling files that live in this
+  # directory but are not notebook pages (e.g. code_review_2026-07-01.md, the
+  # figures/ python source).
+  render:
+    - "*.qmd"
+
+website:
+  title: "SENSEI Charge-Trap Notebook"
+  reader-mode: true
+  sidebar:
+    style: docked
+    search: true
+    contents:
+      - text: "Index"
+        file: index.qmd
+      - section: "Threads"
+        contents:
+          - text: "1 · Dipole algorithm"
+            file: dipole_algorithm.qmd
+          - text: "2 · Signed-refit investigation"
+            file: signed_refit.qmd
+          - text: "3 · Completeness & efficiency"
+            file: completeness_efficiency.qmd
+          - text: "4 · Simulation physics"
+            file: physics.qmd
+          - text: "5 · Results"
+            file: results.qmd
+      - text: "Glossary"
+        file: glossary.qmd
+
+format:
+  html:
+    theme: cosmo
+    toc: true
+    toc-depth: 3
+    code-fold: true          # code cells collapsed by default; reader clicks to see them
+    code-tools: true
+    fig-format: svg
+    fig-width: 11
+    fig-height: 4.5
+
+# Cache executed cells so re-renders are instant unless the code changes.
+execute:
+  freeze: auto
+  warning: false
+
+# Run {python} cells in the conda env via its registered named kernel, so cells
+# execute in sensei_charge_traps_new regardless of which python/quarto is on PATH.
+# Register the kernel once with:
+#   conda run -n sensei_charge_traps_new python -m ipykernel install --user \
+#       --name sensei_charge_traps_new --display-name "Python (sensei_charge_traps_new)"
+jupyter: sensei_charge_traps_new

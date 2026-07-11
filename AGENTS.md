@@ -36,8 +36,9 @@ No test suite, no linter configured. Notebooks ([charge_trap_analysis.ipynb](cha
 ## Architecture notes
 
 **Before touching trap physics** (`fast_readout_numba`, `charge_trap_interaction`,
-`log_energy_cross_section`) read [notebook/physics.md](notebook/physics.md) (start at
-[INDEX.md](INDEX.md)) — it records the SRH model, the three successive recapture models (the current
+`log_energy_cross_section`) read the **Simulation physics** page of the Quarto lab notebook
+([notebook/physics.qmd](notebook/physics.qmd); start at
+[index.qmd](notebook/index.qmd)) — it records the SRH model, the three successive recapture models (the current
 one is `phase_limited_v1v3`), the V_p/σ systematics, the constants-fix history, the instrumented
 deviation budget, and all confirmed operating-condition decisions.
 
@@ -85,8 +86,8 @@ Both [run_charge_traps.py](run_charge_traps.py) and the notebooks follow a `try:
 - `log_energy_cross_section(T, E, log_sigma)` is the thermal-emission model used to extrapolate τ to arbitrary T (how `tau_at_<T>k_hist.npz` files are generated).
 
 The legacy (`dipole.py`) and minimal (`dipole_new.py`) analysis pipelines are documented in
-[notebook/dipole_algorithm.md](notebook/dipole_algorithm.md); the investigation that chose the minimal
-one is in [notebook/signed_refit.md](notebook/signed_refit.md).
+[notebook/dipole_algorithm.qmd](notebook/dipole_algorithm.qmd); the investigation that chose the minimal
+one is in [notebook/signed_refit.qmd](notebook/signed_refit.qmd).
 
 ### Reference FITS header
 [run_ccd_simulation.py](run_ccd_simulation.py) reads one specific SNOLAB 135 K FITS from [snolab_image/](snolab_image/) purely to recover CCD timing (`HIERARCH DELAY_*` keys) for `pixel_time` / `pixel_time_vertical`. Missing that file is fatal — keep it around even when simulating MINOS conditions.

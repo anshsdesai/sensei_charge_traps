@@ -1,0 +1,672 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Trap Measurement Completeness &mdash; Detection, Selection, and Simulation Completeness</title>
+<style>
+  :root { --ink:#1a1a1a; --mut:#5a5a5a; --line:#d8d8d8; --bg:#fbfbf9; --code:#f3f3ef;
+          --blue:#1f5fa8; --red:#b3331f; --green:#2f7d3a; --warn:#9a6b00; }
+  * { box-sizing:border-box; }
+  body { font:16px/1.6 -apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;
+         color:var(--ink); background:var(--bg); margin:0; }
+  .wrap { max-width:980px; margin:0 auto; padding:48px 28px 120px; }
+  h1 { font-size:30px; line-height:1.25; margin:0 0 6px; }
+  h2 { font-size:23px; margin:46px 0 12px; padding-bottom:6px; border-bottom:2px solid var(--line); }
+  h3 { font-size:18px; margin:28px 0 8px; color:#222; }
+  .sub { color:var(--mut); font-size:14.5px; margin:0 0 26px; }
+  p { margin:10px 0; }
+  code { background:var(--code); padding:1.5px 5px; border-radius:4px; font-family:"SF Mono",Consolas,monospace; font-size:13.5px; }
+  pre { background:var(--code); border:1px solid var(--line); border-radius:8px; padding:14px 16px; overflow-x:auto; font-family:"SF Mono",Consolas,monospace; font-size:13px; line-height:1.5; }
+  table { border-collapse:collapse; width:100%; margin:14px 0; font-size:14px; }
+  th,td { border:1px solid var(--line); padding:7px 10px; text-align:left; }
+  th { background:#efeee9; font-weight:600; }
+  td.n,th.n { text-align:right; font-variant-numeric:tabular-nums; }
+  .callout { border-left:4px solid var(--blue); background:#eef4fb; padding:12px 16px; border-radius:0 8px 8px 0; margin:16px 0; }
+  .callout.warn { border-color:var(--warn); background:#fbf5e6; }
+  .callout.key  { border-color:var(--green); background:#eef7ef; }
+  .tag { display:inline-block; font-size:11px; font-weight:700; letter-spacing:.04em; text-transform:uppercase;
+         padding:2px 8px; border-radius:10px; vertical-align:middle; }
+  .tag.old { background:#f3e0dc; color:var(--red); }
+  .tag.new { background:#dcebf6; color:var(--blue); }
+  .tag.naive { background:#e6e6e6; color:#444; }
+  ul,ol { margin:10px 0 10px 4px; padding-left:22px; }
+  li { margin:5px 0; }
+  .muted { color:var(--mut); }
+  .toc { background:#fff; border:1px solid var(--line); border-radius:10px; padding:16px 22px; font-size:14.5px; }
+  .toc ol { margin:6px 0; }
+  hr { border:none; border-top:1px solid var(--line); margin:36px 0; }
+  .fileref { font-family:"SF Mono",Consolas,monospace; font-size:12.5px; color:var(--mut); }
+  .tabs { display:flex; gap:6px; margin:20px 0 0; flex-wrap:wrap; }
+  .tabbtn { appearance:none; border:1px solid var(--line); border-bottom:none; background:#ecebe5;
+            padding:10px 22px; font:inherit; font-weight:600; font-size:15px; cursor:pointer;
+            border-radius:9px 9px 0 0; color:#666; }
+  .tabbtn.active { background:var(--bg); color:var(--ink); box-shadow:0 -3px 0 var(--blue) inset; }
+  .tab-panel { display:none; border-top:2px solid var(--line); padding-top:6px; }
+  .tab-panel.active { display:block; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<h1>Trap Measurement Completeness</h1>
+<p class="sub">End-to-end completeness and purity of the single-electron charge-trap measurement. Four tabs:
+(1)&nbsp;the <strong>dipole detection &amp; selection</strong> that builds the &tau;(135&nbsp;K) catalog,
+(2)&nbsp;the <strong>Method&nbsp;3 simulation completeness</strong> that consumes it,
+(3)&nbsp;a <strong>figure reference</strong>, and
+(4)&nbsp;the <strong>validation log</strong> &mdash; every check and fix behind the current numbers.
+&nbsp;|&nbsp; Updated 2026-06-17. Pipeline: <span class="fileref">dipole_new.py</span> (minimal, forward) /
+<span class="fileref">dipole.py</span> (legacy), <span class="fileref">trap_completeness_method3/</span>,
+<span class="fileref">figure_utils.py</span>.</p>
+
+<div class="tabs">
+  <button class="tabbtn active" onclick="showTab('detection',this)">Detection &amp; Selection</button>
+  <button class="tabbtn" onclick="showTab('review',this)">Method&nbsp;3 Completeness</button>
+  <button class="tabbtn" onclick="showTab('figures',this)">Figure Reference</button>
+  <button class="tabbtn" onclick="showTab('validation',this)">Validation &amp; Fixes</button>
+</div>
+
+<!-- ============================ TAB 1: DETECTION & SELECTION ============================ -->
+<div class="tab-panel active" id="tab-detection">
+
+<div class="toc">
+<strong>Contents &mdash; Detection &amp; Selection</strong>
+<ol>
+<li>Where this sits in the pipeline</li>
+<li>What the minimal dipole finding does</li>
+<li>The signed + pedestal intensity model</li>
+<li>Selection criteria &amp; funnel</li>
+<li>Purity &mdash; false-positive rate</li>
+<li>Tunable knobs &amp; reproduce</li>
+</ol>
+</div>
+
+<h2>1. Where this sits in the pipeline</h2>
+<p>Dipole <strong>detection</strong> (finder) &rarr; per-dipole <strong>intensity(t<sub>ph</sub>) fit</strong> at each temperature
+&rarr; per-trap <strong>SRH E/&sigma; fit</strong> across temperatures &rarr; <strong>&tau;(135&nbsp;K) histogram</strong> &rarr;
+<strong>Method-3 simulation completeness</strong>. This tab covers the first three (detection + selection + characterization),
+which together produce the &tau;(135&nbsp;K) catalog the <em>Method&nbsp;3 Completeness</em> tab consumes.</p>
+<p>Two code paths, selected by <code>run_charge_traps.py --pipeline {legacy,minimal}</code>:
+<span class="tag old">legacy</span> <span class="fileref">dipole.py</span> (git HEAD) and
+<span class="tag new">minimal</span> <span class="fileref">dipole_new.py</span> &mdash; the synthesis used going forward.
+Minimal artifacts are suffixed <code>_minimal</code>&thinsp;/&thinsp;<code>_caldet</code> so the two never overwrite each other.</p>
+
+<h2>2. What the minimal dipole finding does</h2>
+<p>The minimal pipeline keeps the legacy peaked-emission physics (and the SRH prefactor) but makes the measurement
+<strong>honest about sign, baseline, and per-point noise</strong>. Five deliberate changes:</p>
+<table>
+<tr><th>Aspect</th><th>Legacy</th><th>Minimal (forward)</th><th>Why</th></tr>
+<tr><td>Dipole intensity</td><td><code>absolute=True</code> &mdash; <code>|I|</code> folded positive</td>
+    <td><code>absolute=False</code> &mdash; signed <code>I=(lobe<sub>a</sub>&minus;lobe<sub>b</sub>)/2</code></td>
+    <td>Sign encodes trap orientation; needed to detect sign-flip contamination</td></tr>
+<tr><td>Baseline</td><td>through-zero (no offset)</td><td>fitted constant pedestal <code>offset</code></td>
+    <td>Data plateau at &ne;0 at high&nbsp;T (readout deferral); through-zero biases &tau;</td></tr>
+<tr><td>Per-point error</td><td>spatial 34&times;34 patch &sigma; (<code>error_model='patch'</code>, ~183 e&minus;)</td>
+    <td>temporal pair-noise (<code>error_model='physical'</code>, ~36 e&minus; base; <code>absolute_sigma=True</code>)</td>
+    <td>Patch &sigma; overestimates the per-point error ~5&times;</td></tr>
+<tr><td>Finder</td><td>histogram-&sigma; threshold + 0.3 symmetry cut</td>
+    <td><code>robust_sigma=True</code> (MAD), <code>symmetry_perc=None</code></td>
+    <td>Histogram &sigma; is inflated by dark-current tails at high T &rarr; desensitized</td></tr>
+<tr><td>Orientation</td><td>none</td><td>sign-consistency class gates the SRH fit</td>
+    <td>A single real trap pumps one direction at all T</td></tr>
+</table>
+<p>Selection then gates on the across-temperature SRH fit with a dof-insensitive
+<code>reduced &chi;&sup2; &lt; 4</code> (this replaced a biased p-value cut &mdash; see the <em>Validation &amp; Fixes</em> tab &sect;1).</p>
+
+<h2>3. The signed + pedestal intensity model</h2>
+<p>Both pipelines use the identical peaked model (<span class="fileref">dipole_new.py:477</span>); the minimal one adds the offset:</p>
+<pre>I(t_ph) = 3000 &middot; coeff &middot; (exp(&minus;t_ph/&tau;) &minus; exp(&minus;8 t_ph/&tau;))  [+ offset]</pre>
+<ul>
+<li>The bump is <strong>0 at t&rarr;0 and 0 at t&rarr;&infin;</strong>, peaking at t* = ln(8)/7&middot;&tau; &asymp; 0.30&tau;,
+height &asymp; 1950&middot;coeff. Every curve starts and asymptotes at <code>offset</code>.</li>
+<li><strong>Negative intensities</strong> are real: signed dipoles with the opposite orientation. <code>coeff</code> and
+<code>offset</code> are both signed and need not agree (offset orientation is set by readout direction).</li>
+<li><strong>Different start points</strong> = the per-temperature pedestal (legacy forced everything through 0).</li>
+<li><strong>Monotonic-looking curves</strong> at extreme T = the bump apex sits off-screen (very cold &tau;&gt;window:
+rising edge only; very hot &tau;&lt;window: flat at offset).</li>
+</ul>
+<div class="callout key"><strong>The pedestal is physical and load-bearing.</strong> It is the readout-deferral (CTI) pedestal:
+during readout, dark/background charge clocked through the trap's pixel is partly deferred, making a fixed dipole independent
+of t<sub>ph</sub>. The fitted <code>|offset|</code> tracks dark current and is highly significant:</p>
+<table>
+<tr><th class="n">T [K]</th><th class="n">140</th><th class="n">150</th><th class="n">160</th><th class="n">170</th><th class="n">180</th><th class="n">195</th><th class="n">210</th></tr>
+<tr><td>median &#124;offset&#124; [e&minus;]</td><td class="n">95</td><td class="n">105</td><td class="n">311</td><td class="n">950</td><td class="n">895</td><td class="n">755</td><td class="n">598</td></tr>
+<tr><td>offset / its error</td><td class="n">8.1</td><td class="n">8.1</td><td class="n">19</td><td class="n">65</td><td class="n">99</td><td class="n">76</td><td class="n">55</td></tr>
+</table>
+<p style="margin:8px 0 0">The pumped amplitude is ~T-independent (&asymp;1000 e&minus;), as a fixed-charge-per-cycle deferral should be.
+Caveat: at 125&ndash;130 K (&tau; &gg; window) offset and coeff are partially degenerate &mdash; treat cold-tail offsets with care.</p></div>
+
+<h2>4. Selection criteria &amp; funnel</h2>
+<p>A trap enters the catalog iff
+<code>WellBehavedTrap (&ge;4 good temps) &amp; OrientationConsistent &amp; GoodEnergyFit &amp; not&nbsp;EnergyFitFailed</code>.
+The per-temperature intensity detection uses a calibrated &Delta;&chi;&sup2; guard (0.1%/temp); the per-temperature intensity
+GOF is well-calibrated (kept good-temp reduced &chi;&sup2;: median <strong>0.90</strong>, IQR 0.65&ndash;1.17).</p>
+<table>
+<tr><th>Stage</th><th class="n"><span class="tag old">legacy</span></th><th class="n"><span class="tag new">minimal</span></th></tr>
+<tr><td>Dipoles found (finder)</td><td class="n">5,171</td><td class="n">9,333</td></tr>
+<tr><td>&hellip; minimal-found is a strict superset of legacy</td><td class="n" colspan="2">exact overlap = 5,171 (0 legacy coords missed)</td></tr>
+<tr><td><strong>Pass full selection</strong> (reduced &chi;&sup2;&lt;4 GOF)</td><td class="n">2,135</td><td class="n"><strong>2,928</strong></td></tr>
+</table>
+<p>The finder finds more (relaxed MAD threshold + no symmetry cut, both legitimately additive). The minimal selection keeps
+68% more traps than under the old p-value GOF, while the &tau;@135K <em>shape</em> &mdash; including the SER-relevant
+long-&tau;/high-E tail &mdash; barely moves: this is a yield + review-defensibility improvement, not a change to the SER projection
+(see <em>Validation &amp; Fixes</em> &sect;1&ndash;2).</p>
+
+<h2>5. Purity &mdash; false-positive rate</h2>
+<div class="callout key">Run through 8,000 trap-free control pairs, the full minimal selection yields <strong>1</strong> false positive
+&rarr; catalog FPR &asymp; <strong>0.01%</strong> (~0.4 expected noise false positives in 2,928). Purity is enforced upstream by the
+calibrated per-temperature detection guard, the &ge;4-temperature requirement, and sign consistency; the SRH &chi;&sup2; cut's real
+job is rejecting <em>blends</em> (real charge, wrong model), which a trap-free null cannot measure. Full null test in
+<em>Validation &amp; Fixes</em> &sect;3.</div>
+
+<h2>6. Tunable knobs &amp; reproduce</h2>
+<ul>
+<li><strong>SRH GOF threshold</strong> (<code>srh_reduced_chi2_max</code>, <span class="fileref">dipole_new.py:810</span>): currently
+<code>4</code>. Going to <code>10</code> is <em>FPR-free</em> and recovers ~407 marginal traps while still cutting the 208 gross blends.
+Pure yield-vs-purity call; the SER is insensitive either way. (Note: changing it is <strong>catalog-only</strong> for Method&nbsp;3 &mdash;
+<em>Method&nbsp;3 Completeness</em> &sect;4.) <em>Decision pending.</em></li>
+<li><strong>Min temperatures</strong> (<code>--well_behaved_threshold</code>, default 4): lowering to 3 recovers ~215 traps with no new modeling.</li>
+<li><strong>Detection guard</strong>: <code>--detection calibrated</code> (per-temp &Delta;&chi;&sup2; at <code>--detection_target_fpr</code>=0.001)
+is in use, vs the uncalibrated <code>fixed</code> (11.83).</li>
+</ul>
+<pre>conda activate sensei_charge_traps_new
+# full minimal pipeline (reuses cached stages):
+python run_charge_traps.py --pipeline minimal --detection calibrated
+# refit only after a GOF/threshold change (reuses coords/MC/noise/spectra/detection table):
+#   python run_charge_traps.py --pipeline minimal --detection calibrated --overwrite fit</pre>
+<p class="muted">Current catalog: <span class="fileref">fit_dipole_spectra_minimal_caldet_err_4.h5</span>;
+seeds <span class="fileref">tau_at_135k_hist_minimal_caldet.npz</span>,
+<span class="fileref">pair_noise_table_minimal.npz</span>,
+<span class="fileref">detection_calibration_minimal.npz</span>,
+<span class="fileref">dipole_coord_list_minimal.npz</span>.</p>
+
+</div><!-- /tab-detection -->
+
+<!-- ============================ TAB 2: METHOD 3 COMPLETENESS ============================ -->
+<div class="tab-panel" id="tab-review">
+
+<div class="toc">
+<strong>Contents &mdash; Method&nbsp;3 Completeness</strong>
+<ol>
+<li>What Method&nbsp;3 computes</li>
+<li>How it builds the completeness map (stages)</li>
+<li>&tau;(135&nbsp;K) is an extrapolation &mdash; reading the map</li>
+<li>The energy fit is catalog-derived</li>
+<li>Flavors: minimal is the headline</li>
+<li>Outputs &amp; how to regenerate</li>
+</ol>
+</div>
+
+<h2 id="m3-what">1. What Method&nbsp;3 computes</h2>
+<p>Method&nbsp;3 is a <strong>data-driven measurement-completeness</strong> for the catalog produced in the Detection tab. For a clean
+single trap at a point in the <code>(&tau;<sub>135</sub>, E)</code> plane it estimates the probability that the experiment would have
+<strong>detected and characterized</strong> it, and decomposes the misses into (a) the trap never entering the measurement window and
+(b) selection inefficiency. The headline quantity is
+<code>P(&ge;4 good intensity fits | &tau;<sub>135</sub>, E)</code> &mdash; the intensity-reach &mdash; multiplied by the energy-fit factor (&sect;4).</p>
+
+<h2 id="m3-how">2. How it builds the completeness map</h2>
+<p>Stage order (<span class="fileref">run_chain.py</span>): 01 records &rarr; 02 noise parity &rarr; 03 noise map &rarr;
+04 intensity-error scaling &rarr; 05 amplitude prior &rarr; 06 single-curve recovery &rarr; 07 single-temperature p<sub>det</sub>
+&rarr; <strong>08 forward p<sub>det</sub> grid</strong> &rarr; <strong>09 characterization probability</strong> &rarr;
+<strong>10 completeness</strong>.</p>
+<h3>Stage 08 &mdash; the forward detection grid</h3>
+<p>For each grid point (temperature T, emission time &tau;, amplitude A) it runs an injection-recovery: build the noisy
+intensity-vs-delay curve, fit it with the flavor's intensity model, apply the per-temperature cuts, and record the pass fraction as
+<code>p_det(T, &tau;, A)</code>. The injection is now <strong>flavor-consistent</strong>: minimal scatters with the calibrated
+pair-noise floor (~36 e&minus;) and a realistic pedestal drawn from the catalog into the truth; legacy uses its patch &sigma; and
+reconstructs signed&rarr;abs (see <em>Validation &amp; Fixes</em> &sect;5 for the as-built injection).</p>
+<h3>Stage 09/10 &mdash; from p<sub>det</sub> to <em>P</em>(characterized)</h3>
+<p>For each <code>(&tau;<sub>135</sub>, E)</code>: infer log&nbsp;&sigma; from the SRH relation, compute the implied &tau;(T) at every
+measured temperature, interpolate the stage-08 grid at A from the stage-05 depth prior, then form the
+<strong>intensity probability</strong> = <em>P</em>(&ge;4 of 23 temperatures detected) via a Poisson-binomial. Out-of-band policy: any
+temperature whose &tau;(T) falls outside the stage-08 &tau; band gets <code>p_det=0</code>; when <em>all</em> temperatures are out of band
+the trap is unrecoverable by construction (~15% of the grid, beginning at &tau;<sub>135</sub>&nbsp;&asymp;&nbsp;193&nbsp;s). Stage&nbsp;10
+averages over the observed E distribution to make the completeness curve.</p>
+
+<h2 id="m3-extrap">3. &tau;(135&nbsp;K) is an extrapolation &mdash; reading the map</h2>
+<p>The map's x-axis is the emission time <em>at 135&nbsp;K</em>. For a long-&tau;<sub>135</sub> / high-E trap, &tau; at 135&nbsp;K is far
+outside any pump delay &mdash; such a trap is <strong>not measured at 135&nbsp;K</strong>; its &tau;<sub>135</sub> is the SRH
+<em>extrapolation</em>. It was actually detected at <strong>high temperature</strong>, where &tau;(T) drops into the measurable window.</p>
+<div class="callout key">This is why characterized traps appear in apparently low-probability regions of the completeness map: they are survivors
+of a population, and the far-right arm was <em>caught hot</em>, in-window. Coloring the characterized traps by the temperature at which
+they got their good intensity fits makes this explicit &mdash; the right arm is hot (~200&ndash;250&nbsp;K) and the gradient tracks the
+diagonal high-probability ridge (<code>corr(log&nbsp;&tau;<sub>135</sub>, mean good-T)&nbsp;=&nbsp;+0.62</code>). See the
+<em>Figure Reference</em> tab, &ldquo;completeness map (caught-at-T)&rdquo;.</div>
+
+<h2 id="m3-catalog">4. The energy fit is catalog-derived</h2>
+<p>Completeness factorizes as <strong>intensity reach &times; energy-fit factor</strong>. Crucially, <strong>no Method-3 stage runs the SRH
+energy fit</strong> &mdash; stages 06&ndash;08 forward-model only the per-temperature <em>intensity</em> detection, and stages 01/05/09/10
+merely <em>read</em> the catalog's stored <code>GoodEnergyFit</code>/<code>WellBehavedTrap</code> flags. Consequences:</p>
+<ul>
+<li><strong>The SRH &chi;&sup2; threshold is catalog-only.</strong> Changing it (Detection &sect;6) never touches the stage-08 grid. Regenerate the
+catalog, then <code>run_chain.py --reuse-grid</code> reruns just 01/05/09/10 &mdash; no ~24h grid rebuild.</li>
+<li><strong>Do not confuse it with the intensity-detection &Delta;&chi;&sup2; threshold</strong> (<code>delta_chi2_vs_constant</code>), which <em>is</em>
+baked into stages 06&ndash;08 and does require a grid rebuild if changed.</li>
+<li><strong>The energy-fit factor was measured</strong> by a lean injection-recovery that runs the real SRH fit on clean traps
+(<em>Validation &amp; Fixes</em> &sect;7): for minimal it is <strong>~0.96</strong> with calibrated &sigma;<sub>&tau;</sub>, so
+<code>P(characterized) &asymp; 0.96 &times; P(&ge;4 good intensity)</code> &mdash; no separate forward grid needed.</li>
+</ul>
+
+<h2 id="m3-flavors">5. Flavors: minimal is the headline</h2>
+<p>Both flavors run through the same chain via <code>--flavor {minimal_caldet, legacy}</code>. The lean check showed minimal's recovered
+&tau; errors are calibrated (pull RMS&nbsp;1.01) while legacy's are ~1.7&times; optimistic (pull RMS&nbsp;1.69, up to 2.7 at the cold edge),
+its SRH survival propped only by the loose reduced&nbsp;&chi;&sup2;&lt;5 gate. <strong>Minimal is the pipeline to headline;</strong> legacy is a
+reference comparison. (Details and numbers: <em>Validation &amp; Fixes</em> &sect;7.)</p>
+
+<h2 id="m3-outputs">6. Outputs &amp; how to regenerate</h2>
+<table>
+<tr><th>Figure (<span class="fileref">figure_utils.py</span>)</th><th>What it is</th></tr>
+<tr><td><span class="fileref">efficiency_completeness.pdf</span></td><td>completeness <em>P&#772;</em>(characterized, E) vs &tau;<sub>135</sub>, with the catalog &tau;<sub>135</sub> histogram</td></tr>
+<tr><td><span class="fileref">prob_of_measuring.pdf</span></td><td>2-D map of <em>P</em>(&ge;4 good intensity fits) over (&tau;<sub>135</sub>, E) with characterized traps overlaid</td></tr>
+<tr><td><span class="fileref">prob_of_measuring_caught_at_T_*.pdf</span></td><td>same map, traps colored by the temperature where they were caught (&sect;3)</td></tr>
+</table>
+<div class="callout"><strong>Regenerate.</strong> The flavor-consistent injection (WS1) changed stage 08 for <em>both</em> flavors, so both grids must be
+rebuilt once:
+<pre>conda run --no-capture-output -n sensei_charge_traps_new \
+    python trap_completeness_method3/run_chain.py --flavor legacy         --fresh-grid
+conda run --no-capture-output -n sensei_charge_traps_new \
+    python trap_completeness_method3/run_chain.py --flavor minimal_caldet --fresh-grid</pre>
+Shared stages 02&ndash;04 are cached and auto-skip; the stage-08 rebuild is the ~24h pole. After that, an SRH &chi;&sup2;-threshold change
+is catalog-only &mdash; regenerate the catalog, then <code>--reuse-grid</code> (only 01/05/09/10 rerun).</div>
+
+</div><!-- /tab-review -->
+
+<!-- ============================ TAB 3: FIGURE REFERENCE ============================ -->
+<div class="tab-panel" id="tab-figures">
+
+<div class="toc">
+<strong>Contents &mdash; Figure Reference</strong>
+<ol>
+<li>Per-trap example figures</li>
+<li>Dropped-trap catalog</li>
+<li>E / &tau;@135K comparison</li>
+<li>Method-3 completeness curve</li>
+<li>Method-3 completeness map (+ caught-at-T)</li>
+</ol>
+</div>
+
+<h2>1. Per-trap example figures</h2>
+<p>Every per-trap figure is two stacked panels:</p>
+<ul>
+<li><strong>Top &mdash; signed Intensity vs t<sub>ph</sub></strong> (one colored series per temperature, hot=red&rarr;cold=yellow via the
+120&ndash;210&nbsp;K colormap). In diagnostic mode: <strong>filled &deg;</strong> = a temperature that passed the per-temp gate, with its
+fitted curve <em>including the pedestal</em>; <strong>faint &times;</strong> = a temperature rejected by the gate (data only).</li>
+<li><strong>Bottom &mdash; &tau;<sub>e</sub>(T)</strong>: per-temperature fitted &tau; for the good temps; the <strong>black dashed line</strong>
+is the SRH/Arrhenius fit (present only when the trap reached the E/&sigma; fit).</li>
+</ul>
+<table>
+<tr><th>File</th><th>What it shows</th></tr>
+<tr><td><span class="fileref">figures_old/example_trap_{0&ndash;4}.pdf</span></td>
+    <td><span class="tag old">legacy</span>: <code>|I|</code> folded + through-zero. Clean positive bumps that start/end at 0 and march
+    right as T drops &mdash; the &ldquo;expected&rdquo; look.</td></tr>
+<tr><td><span class="fileref">figures/example_trap_{0&ndash;4}.pdf</span></td>
+    <td><span class="tag new">minimal</span>: signed + pedestal over a wider T range. Curves are signed (some negative),
+    start/asymptote at the per-temperature <code>offset</code>, look monotonic where the bump apex is off-screen. Same physics, honest
+    baseline (Detection &sect;3 explains every visual difference).</td></tr>
+</table>
+<p class="muted">Paper-style examples use <em>paper_mode</em> (pedestal subtracted, sign flipped up) via
+<code>figure_utils.plot_example_traps</code>; the catalog uses <em>diagnostic mode</em> (raw signed data + full model) to expose fit quality.</p>
+
+<h2>2. Dropped-trap catalog &mdash; <code>figures/dropped_catalog/</code></h2>
+<p>Representative legacy-passing traps the minimal pipeline still drops, plus kept controls. <span class="fileref">_index.md</span> lists
+every file with quad/coord; each filename carries the trap's stats (OrientationClass, n+/n&minus;, good_temps, E, SRH reduced&nbsp;&chi;&sup2;, p).</p>
+<table>
+<tr><th>Files</th><th class="n">#</th><th>Category &mdash; what to look for</th></tr>
+<tr><td><span class="fileref">dual_response_{0&ndash;5}.pdf</span></td><td class="n">6</td>
+    <td>Some temps' bumps point up, others down; &tau;(T) incoherent. Real contamination (two traps in one pixel).</td></tr>
+<tr><td><span class="fileref">orientation_stray_{0&ndash;3}.pdf</span></td><td class="n">4</td>
+    <td>One stray &gt;3&sigma; opposite-sign temperature among an otherwise consistent set.</td></tr>
+<tr><td><span class="fileref">srh_gross_redchi2_{0&ndash;5}.pdf</span></td><td class="n">6</td>
+    <td>reduced &chi;&sup2; &ge; 10: &tau;(T) splits into two disjoint branches = blend; SRH fit collapses. Correctly cut.</td></tr>
+<tr><td><span class="fileref">srh_moderate_redchi2_{0&ndash;5}.pdf</span></td><td class="n">6</td>
+    <td>4 &le; reduced &chi;&sup2; &lt; 10: mostly hug the Arrhenius line with extra scatter. The arguable middle ground.</td></tr>
+<tr><td><span class="fileref">lt4_3temp_{0&ndash;5}.pdf</span></td><td class="n">6</td>
+    <td>Exactly 3 clean temperatures, killed by the &ge;4 rule. Recoverable.</td></tr>
+<tr><td><span class="fileref">lt4_clearbad_{0&ndash;3}.pdf</span> / <span class="fileref">kept_control_{0&ndash;2}.pdf</span></td><td class="n">4 / 3</td>
+    <td>Clearly bad (&le;1 temp) / passing controls for comparison (single orientation, &tau;(T) on the dashed line, low &chi;&sup2;).</td></tr>
+</table>
+
+<h2>3. E / &tau;@135K comparison</h2>
+<p><span class="fileref">figures/dropped_catalog/E_tau135_comparison.pdf</span> &mdash; density histograms of energy and &tau;@135K (log) for
+<em>kept</em> vs the still-dropped SRH buckets. The curves overlap: dropped traps span the same E/&tau; space as kept &mdash; the visual proof
+that the selection does not preferentially remove (or retain) the SER-relevant long-&tau;/high-E tail.</p>
+
+<h2>4. Method-3 completeness curve &mdash; <code>efficiency_completeness.pdf</code></h2>
+<p>The red curve is <em>P&#772;</em>(characterized,&nbsp;E) vs &tau;<sub>135</sub> (averaged over the observed E distribution); the twin-axis
+histogram is the catalog's &tau;<sub>135</sub>, split blue/green into <strong>extrapolated</strong> vs <strong>directly measured at 135&nbsp;K</strong>.
+The curve rises at sub-second &tau;<sub>135</sub>, peaks at a few seconds, and extends out to ~1000&nbsp;s &mdash; the long tail is real because a
+slow-at-135K trap reaches &tau;(T)~1&nbsp;s at hot temperatures and is measurable there (Method&nbsp;3 &sect;3). It dies past the delay-window edge.</p>
+
+<h2>5. Method-3 completeness map &mdash; <code>prob_of_measuring.pdf</code> (+ caught-at-T)</h2>
+<p><strong>Plain map</strong> (<code>figure_utils.plot_completeness_map</code>): a <code>pcolormesh</code> of <em>P</em>(&ge;4 good intensity fits)
+over (&tau;<sub>135</sub>, E), with characterized traps overlaid as red dots. The smooth <strong>diagonal bands</strong> are physical &mdash; one
+per discrete measurement temperature crossing in/out of the measurable delay window.</p>
+<div class="callout key"><strong>Caught-at-T map</strong> (<code>figure_utils.plot_completeness_map_caught_at_T</code>, new): the same map, but each
+characterized trap is colored by the temperature at which it was actually caught (the <code>mean</code> &mdash; or <code>median</code>/<code>max</code>,
+selectable &mdash; of its good-intensity-fit temperatures), using the example-trap palette (red=hot). It shows the apparent low-probability
+<strong>right arm is hot (~200&ndash;250&nbsp;K)</strong>: those traps were measured in-window at high T, not at 135&nbsp;K
+(<code>corr(log&nbsp;&tau;<sub>135</sub>, mean good-T)&nbsp;=&nbsp;+0.62</code>; the recomputed characterized count matches the red-dot set exactly).
+This is the visual answer to &ldquo;why are characterized traps in low-probability regions&rdquo; (Method&nbsp;3 &sect;3). Driver:
+<code>charge_trap_figures.ipynb</code> calls it for both flavors.</div>
+
+</div><!-- /tab-figures -->
+
+<!-- ============================ TAB 4: VALIDATION & FIXES ============================ -->
+<div class="tab-panel" id="tab-validation">
+
+<div class="toc">
+<strong>Contents &mdash; Validation &amp; Fixes</strong> &mdash; every check and correction behind the current numbers.
+<ol>
+<li>Selection: the SRH goodness-of-fit bias &amp; fix</li>
+<li>What the selection still drops (and why it's not a SER bias)</li>
+<li>Purity: the trap-free null test</li>
+<li>Overlap with the legacy catalog</li>
+<li>Method 3: the noise-injection bug &amp; the flavor-consistent fix (WS1)</li>
+<li>Shared SRH energy-fit helper (WS2)</li>
+<li>The energy-fit completeness check (WS3 retired)</li>
+<li>The two double peaks &mdash; diagnosed &amp; resolved</li>
+<li>High-T completeness optimism &mdash; the forward grid's blind spot</li>
+<li>Net conclusions, status &amp; as-built reference</li>
+</ol>
+</div>
+
+<h2 id="v-gof">1. Selection: the SRH goodness-of-fit bias &amp; fix</h2>
+<div class="callout warn"><strong>Discovery.</strong> The across-temperature SRH/Arrhenius GOF, applied as <code>p&gt;0.05</code>, is statistically biased
+against <em>well-measured</em> traps. With ~15 precise &tau; points and tiny errors the &chi;&sup2; test has the power to reject on the documented
+~1% high-T Arrhenius lean, so traps lying <em>visually perfectly</em> on the line (e.g. <code>srh_gross_0</code>: 16 temps, p=1e&minus;6) were
+cut, while kept traps survived mainly by having <em>fewer</em> temperatures.</div>
+<table>
+<tr><th>SRH pass-rate vs # temperatures</th><th class="n">4&ndash;5</th><th class="n">6&ndash;7</th><th class="n">8&ndash;10</th><th class="n">11&ndash;14</th><th class="n">15&ndash;30</th></tr>
+<tr><td><span class="tag old">OLD</span> p&gt;0.05</td><td class="n">65%</td><td class="n">41%</td><td class="n">28%</td><td class="n">21%</td><td class="n">32%</td></tr>
+<tr><td><span class="tag new">NEW</span> &chi;&sup2;&lt;4</td><td class="n">75%</td><td class="n">60%</td><td class="n">53%</td><td class="n">60%</td><td class="n">77%</td></tr>
+</table>
+<p>Of the 2,563 OLD SRH failures: median reduced &chi;&sup2; only 4.25, <strong>29% had reduced &chi;&sup2;&lt;3</strong> (visually fine), and only
+19% had reduced &chi;&sup2;&gt;10 (genuinely non-Arrhenius). <strong>Fix:</strong> a dof-insensitive
+<code>reduced_chi_squared &lt; srh_reduced_chi2_max (=4.0)</code> at <span class="fileref">dipole_new.py:810</span> &mdash; it does not get stricter
+with more points and still removes the reduced&nbsp;&chi;&sup2;&gt;10 blends.</p>
+<table>
+<tr><th>Metric</th><th class="n">OLD (p&gt;0.05)</th><th class="n">NEW (&chi;&sup2;&lt;4)</th></tr>
+<tr><td>minimal passing traps</td><td class="n">1,741</td><td class="n">2,928 (+1,187)</td></tr>
+<tr><td>recovered / newly dropped</td><td class="n" colspan="2">+1,187 recovered, <strong>0 newly dropped</strong> (pure superset)</td></tr>
+<tr><td>&tau;@135K median [s] / fraction &gt;100&nbsp;s</td><td class="n">5.74 / 0.020</td><td class="n">6.07 / 0.019</td></tr>
+</table>
+<div class="callout key">The &tau;@135K shape barely moves despite 68% more traps &mdash; a yield + review-defensibility fix, <strong>not</strong> a change to the
+dark-matter (SER) projection.</div>
+
+<h2 id="v-dropped">2. What the selection still drops (and why it's not a SER bias)</h2>
+<p>Legacy-passing traps still dropped by minimal under the new GOF (exact match; finder superset so none are &ldquo;not found&rdquo;).
+1,458/1,464 failed exactly <em>one</em> criterion.</p>
+<table>
+<tr><th>Category</th><th class="n">N</th><th>Verdict</th></tr>
+<tr><td><code>dual_response</code> (&ge;2 temps of each sign)</td><td class="n">64</td><td>Genuine contamination. Correctly cut.</td></tr>
+<tr><td><code>orientation_stray</code> (one stray &gt;3&sigma; opposite)</td><td class="n">28</td><td>Mostly real contamination; arguable.</td></tr>
+<tr><td><code>srh_gross_redchi2</code> (reduced &chi;&sup2; &ge; 10)</td><td class="n">208</td><td>Non-Arrhenius (blend). Correctly cut.</td></tr>
+<tr><td><code>srh_moderate_redchi2</code> (4 &le; reduced &chi;&sup2; &lt; 10)</td><td class="n">407</td><td>Marginal &mdash; recoverable via &chi;&sup2;&lt;10.</td></tr>
+<tr><td><code>lt4_3temp</code> (exactly 3 good temps)</td><td class="n">215</td><td>Recoverable via <code>wellBehavedThreshold=3</code>.</td></tr>
+<tr><td><code>lt4_clearbad</code> (&le;1 good temp)</td><td class="n">32</td><td>Clearly bad.</td></tr>
+</table>
+<p>The dropped classes carry the <em>same</em> E and &tau;@135K distribution as the kept set (median E&asymp;0.30&nbsp;eV, &tau;@135&asymp;6&nbsp;s,
+&tau;&gt;100s 1&ndash;4% in every group) &mdash; dropping them does not erase the SER tail, and recovering them would not move the SER number.</p>
+
+<h2 id="v-fpr">3. Purity: the trap-free null test</h2>
+<p>8,000 trap-free control pairs (<code>DETECTION_SEED=20260615</code>) through the full minimal selection:</p>
+<table>
+<tr><th>Quantity</th><th class="n">Count / 8000</th><th class="n">Rate</th></tr>
+<tr><td>WellBehaved (&ge;4 good temps)</td><td class="n">1</td><td class="n">0.0125%</td></tr>
+<tr><td><strong>PASS full selection, &chi;&sup2;&lt;4</strong></td><td class="n">1</td><td class="n"><strong>0.0125%</strong></td></tr>
+<tr><td>PASS full selection, &chi;&sup2;&lt;10</td><td class="n">1</td><td class="n">0.0125%</td></tr>
+</table>
+<div class="callout key">Catalog FPR &asymp; <strong>0.01%</strong> (~0.4 expected in 2,928). The &chi;&sup2; threshold is <em>not</em> the binding cut &mdash; only 1
+control even reaches it &mdash; so loosening 4&rarr;10 costs <strong>zero</strong> extra noise FPR. Purity is enforced upstream (calibrated
+per-temp guard at 0.1%/temp, the &ge;4 requirement, sign consistency); the &chi;&sup2; cut's job is rejecting blends a trap-free null cannot measure.</div>
+
+<h2 id="v-overlap">4. Overlap with the legacy catalog</h2>
+<table>
+<tr><th>Set</th><th class="n">N</th></tr>
+<tr><td>legacy passers / new minimal passers</td><td class="n">2,135 / 2,928</td></tr>
+<tr><td>shared (exact coord)</td><td class="n">1,061</td></tr>
+<tr><td>legacy-only (we dropped) / minimal-only (new)</td><td class="n">1,074 / 1,867</td></tr>
+</table>
+<p class="muted">Exact (row,col) matching is a <em>floor</em> on the real overlap: the relaxed finder places several candidates within a row or two
+of one real trap, so &plusmn;1-row matching raises &ldquo;shared&rdquo; substantially.</p>
+
+<h2 id="v-ws1">5. Method 3: the noise-injection bug &amp; the flavor-consistent fix (WS1)</h2>
+<div class="callout warn"><strong>Bug (found via a Codex&nbsp;5.5 stress-test).</strong> Method-3 stage 08 injected <strong>spatial patch noise</strong>
+(<code>_local_sigma=np.std(patch)</code>, median ~183&nbsp;e&minus;) for <em>both</em> flavors. Correct for legacy (which detected with patch&nbsp;&sigma;)
+but <strong>wrong for minimal</strong>, which detected with temporal pair-noise (~36&nbsp;e&minus;) and a threshold calibrated on it &mdash; a
+~5&times; over-noising. It made the old minimal completeness (the ~0.44 peak) far too pessimistic.</div>
+<p><strong>Fix (WS1) &mdash; flavor-consistent injection</strong> in <span class="fileref">full_pdet_grid_pilot.py</span> (<code>_simulate_grid_point</code>)
++ the production mirror <span class="fileref">full_pdet_grid.py</span>. Three decisions resolved against the live code/data:</p>
+<ol>
+<li><strong>Minimal shot term is <code>|I<sub>true</sub>|/4</code></strong>, not <code>/2</code>: the live <code>(S<sub>a</sub>+S<sub>b</sub>)/4</code>
+uses <code>max(charge&minus;row_median,0)</code>, so the dark dipole pixel clamps to 0 and only the bright pixel survives. Injected
+<code>&sigma; = sqrt(&sigma;<sub>base</sub><sup>2</sup>(T,q) + |I<sub>true</sub>|/4)</code>, &sigma;<sub>base</sub> from
+<span class="fileref">pair_noise_table_minimal.npz</span> (median ~36&nbsp;e&minus;).</li>
+<li><strong>Pedestal injected into the simulated truth for both flavors</strong>, drawn from the catalog signed <code>fit_offset</code> pool.
+Signed median &asymp;0 but <code>|I<sub>0</sub>|</code> grows with T (~99&nbsp;e&minus;@135K &rarr; ~1040@170K) &mdash; the physical readout-deferral pedestal.</li>
+<li><strong>Legacy = signed&rarr;abs reconstruction</strong>: legacy spectra are <code>absolute=True</code>, so inject the signed truth, add patch noise,
+then <code>np.abs()</code>, then fit offset-free. This reproduces legacy's real high-T pedestal-driven rejections rather than hiding them
+(<code>true_offset=0</code> would have over-claimed legacy completeness).</li>
+</ol>
+<p class="muted">Consistency check passed: rebuilt minimal injection &sigma; median ~36&nbsp;e&minus; (matching the calibration scale), not ~183.</p>
+
+<h2 id="v-ws2">6. Shared SRH energy-fit helper (WS2)</h2>
+<p>The across-temperature energy fit was extracted into <code>fit_energy_cross_section()</code> in both modules so the live analysis and any
+forward model call an identical estimator:</p>
+<pre>dipole.py:442      fit_energy_cross_section(good_temperatures, good_taus, good_tau_errs, wellBehavedThreshold)
+dipole_new.py:524  fit_energy_cross_section(good_temperatures, good_taus, good_tau_errs, good_signs,
+                                            wellBehavedThreshold, errors_are_absolute)</pre>
+<p>The modules legitimately diverge (legacy reduced&nbsp;&chi;&sup2;&lt;5 / no orientation; minimal reduced&nbsp;&chi;&sup2;&lt;4 + orientation from sign),
+so they were mirrored, not unified. <strong>Closure gate:</strong> re-fit 16 dipoles before/after &rarr; <strong>byte-identical, empty diff</strong>.</p>
+
+<h2 id="v-ws3">7. The energy-fit completeness check (WS3 retired)</h2>
+<p>The open question was whether the SRH energy-fit selection erodes the intensity-reach completeness, and whether &sigma;<sub>&tau;</sub> is
+calibrated. Rather than build a full <code>(E,&tau;,A)</code> forward grid, a lean check
+(<span class="fileref">tools/energy_fit_recovery_check.py</span>) ran the joint injection&rarr;recovery <em>only at the known catalog traps'</em>
+fitted <code>(E, ln&sigma;)</code> and their real temperatures/delays, with the WS1 noise + pedestal, the live per-T intensity fit, and the
+WS2 SRH helper (300 traps &times; 20 realizations per flavor):</p>
+<table>
+<tr><th>Quantity (clean injected SRH traps)</th><th class="n">Minimal</th><th class="n">Legacy</th></tr>
+<tr><td><em>P</em>(SRH GoodEnergyFit | &ge;4)</td><td class="n">0.961</td><td class="n">0.925</td></tr>
+<tr><td><strong>&sigma;<sub>&tau;</sub> pull RMS</strong> (target 1.0)</td><td class="n"><strong>1.007</strong> &check;</td><td class="n"><strong>1.686</strong> &cross;</td></tr>
+<tr><td>pull RMS &mdash; cold 120&ndash;145K</td><td class="n">1.17</td><td class="n">2.66</td></tr>
+<tr><td>within-sample re-pass &ge;4 under fresh noise</td><td class="n">0.93</td><td class="n">0.38</td></tr>
+<tr><td>catalog GoodEnergyFit among sampled (real)</td><td class="n">0.703</td><td class="n">0.827</td></tr>
+</table>
+<ul>
+<li><strong>Minimal &mdash; completeness is the intensity-reach curve.</strong> Pull RMS 1.007, flat in amplitude/T &rArr; honest error bars, so the
+~96% SRH survival is real. The energy fit costs only ~4%: <code>P(characterized) &asymp; 0.96 &times; P(&ge;4 good intensity)</code> &mdash; the full
+forward grid is <strong>not warranted</strong>.</li>
+<li><strong>The 0.70&rarr;0.96 gap is purity, not completeness.</strong> Real catalog GoodEnergyFit is 0.70 but a <em>clean</em> SRH trap passes 0.96,
+so the ~30% real failure is the fit <em>rejecting non-SRH objects</em> (blends, dual-response, the high-T lean) &mdash; reported separately as purity.</li>
+<li><strong>Legacy &mdash; propped by a loose threshold.</strong> Its &tau; errors are ~1.7&times; optimistic (up to 2.7&times; cold). SRH survival reads 0.925
+only because reduced&nbsp;&chi;&sup2;&lt;5 absorbs the underestimate; the 0.38 re-pass shows legacy detections sit near its real (high) patch-noise floor.
+Another reason <strong>minimal is the headline</strong>.</li>
+<li><strong>Retired:</strong> WS3 (full forward grid) and the old <strong>survival(k)</strong> factor &mdash; the latter conflated contamination/purity with
+completeness and its &tau;-structure was a k-keying artifact. <strong>Removed in code (2026-06-17):</strong>
+<span class="fileref">characterization_probability.py</span> <code>load_catalog_selection_model</code> now returns <code>None</code> for both flavors
+(<code>APPLY_SURVIVAL_K=False</code> toggle), so the completeness == the intensity reach. See &sect;8(A).</li>
+</ul>
+
+<h2 id="v-doublepeak">8. The two double peaks &mdash; diagnosed &amp; resolved</h2>
+<p>Two curves in this analysis showed a shoulder-dip-peak. They are <strong>different objects on different axes with different
+(both now-understood) origins</strong> &mdash; do not conflate them.</p>
+
+<h3>(A) Completeness vs &tau;<sub>135</sub> &mdash; the <code>survival(k)</code> artifact (removed)</h3>
+<p>Decomposing stage 09: the <em>intensity reach</em> <code>P(&ge;4 good intensity)</code> is smooth/monotonic; the dip appeared <em>only</em>
+after multiplying by the empirical <code>survival(k)</code> (legacy, <code>selection_model=None</code>, had no dip). <code>survival(k)</code> is keyed
+on the good-temperature count alone, so its &tau;<sub>135</sub> projection is non-monotonic &mdash; artifactual &mdash; and it conflated completeness
+with purity. <strong>Removed in stage 9</strong> (&sect;7); the completeness is now the intensity reach (clean energy-fit cost ~0.96 flat is reported
+separately; contamination as purity).</p>
+
+<h3>(B) Naive efficiency vs &tau;(T) &mdash; the legacy pedestal/GOF collapse (real; fixed by minimal)</h3>
+<p>The naive <code>measured/(measured+extrapolated)</code> curve vs the emission time <em>at the measurement temperature</em> is a
+<em>different</em> object. Stage 11 (<span class="fileref">naive_efficiency_closure.py</span>) forward-models it and attributes the dip:</p>
+<table>
+<tr><th>Predictor</th><th>reproduces the dip?</th><th class="n">&chi;&sup2;/bin</th></tr>
+<tr><td>stage-8 detection physics (unconditional)</td><td>no &mdash; smooth high plateau</td><td class="n">6900</td></tr>
+<tr><td>+ &ge;4 conditioning</td><td>no (identical to unconditional)</td><td class="n">6900</td></tr>
+<tr><td>&times; empirical per-temperature GOF survival (hybrid)</td><td><strong>yes</strong></td><td class="n">135</td></tr>
+</table>
+<p>So the dip is <strong>not</strong> intrinsic detectability &mdash; it is the <strong>per-temperature INTENSITY-fit GOF survival collapsing at
+high&nbsp;T</strong>, projected onto &tau;(T) by Arrhenius (hot temps &rarr; short &tau;(T) &rarr; collapsed GOF &rarr; dip). The GOF here is the
+intensity-curve test <code>p_value &gt; 0.05</code> (<span class="fileref">dipole.py:599,611,616</span>; <code>useIntensityErr</code>), <em>not</em>
+the SRH energy-fit <code>reduced &chi;&sup2; &lt; 5</code>. It collapses because legacy's <strong>through-zero model cannot fit the high-T pedestal</strong>
+&rarr; large intensity &chi;&sup2; &rarr; <code>p&lt;0.05</code>.</p>
+<div class="callout key"><strong>Minimal (pedestal-fitted) fills the dip &mdash; confirmed on the real catalogs.</strong> Per-temperature good-fit rate at
+high&nbsp;T rises from legacy ~0.16 to minimal ~0.45 (145&rarr;210&nbsp;K); the naive dip lifts <strong>0.13&rarr;0.41</strong> (dip/peak 0.15&rarr;0.53).
+The failure mode <em>shifts</em>: legacy high-T failures were <code>p_value</code> (GOF) dominated; minimal's are
+<strong><code>amplitude_significance&lt;3</code> dominated (~55%)</strong>, p_value only ~28% &mdash; i.e. the pedestal fix removed the model-misfit collapse.</div>
+<p><strong>The residual minimal dip is genuine, not an artifact.</strong> At the dip temperatures (170&ndash;195&nbsp;K) the curves are in-window
+(95&ndash;98%) with flat noise (~180&nbsp;e&minus;), yet ~half fail <code>amplitude_significance&lt;3</code>: the fit cannot establish the bump at 3&sigma;
+because the offset (pedestal) DOF inflates &sigma;<sub>coeff</sub> and a faster high-T bump gives less amplitude leverage. That is a principled
+detection limit (and the legitimate cost of fitting the pedestal), so the residual dip should <em>stay</em>. (Diagnostic:
+<span class="fileref">tools/naive_dip_legacy_vs_minimal.py</span> &rarr; <span class="fileref">figures/naive_dip_legacy_vs_minimal.png</span>.)</p>
+
+<h2 id="v-hight">9. High-T completeness optimism &mdash; the forward grid's blind spot</h2>
+<p>Investigating whether the WS1 completeness models the high-T detection penalty (it injects the pedestal and applies
+<code>amplitude_significance&lt;3</code>, so it ought to) showed that it <strong>does not</strong>: the completeness is
+<strong>~2&times; optimistic at high T for genuinely good traps</strong>.</p>
+<div class="callout key"><strong>Leave-one-temperature-out holdout test (the unbiased check; codex5.5 design).</strong> Cohort = traps that are
+<em>bright</em> (amplitude estimated from cold/intermediate good temps 140&ndash;165&nbsp;K only, never the target&nbsp;T), <em>in-window</em>,
+and <em>grid-easy</em> (stage-8 p<sub>det</sub>&gt;0.9). At target T = 175&ndash;200&nbsp;K the grid predicts ~0.95 but the
+<strong>observed good-fit rate is ~0.45</strong> (0.37 at 200&nbsp;K). Among the cohort misses the controlling cut is
+<strong>p_value-dominated (45&ndash;67%)</strong>, not <code>amplitude_significance</code> &mdash; so it is <strong>not faintness</strong>
+(and not the amplitude-selection bias of a naive fold, which this test removes). Stage 8 is missing a real high-T failure mode.</div>
+<p><strong>Why the per-temperature intensity GOF (<code>p_value&gt;0.05</code>) fails on bright, in-window high-T curves:</strong></p>
+<table>
+<tr><th>quantity (bright cohort, 175&ndash;195&nbsp;K)</th><th class="n">value</th></tr>
+<tr><td>passing fits, median reduced &chi;&sup2;</td><td class="n">~0.9 (noise model calibrated)</td></tr>
+<tr><td>p=0.05 threshold (dof&asymp;15)</td><td class="n">reduced &chi;&sup2; = 1.67</td></tr>
+<tr><td>failing fits, median reduced &chi;&sup2;</td><td class="n">~3.2&ndash;3.5</td></tr>
+<tr><td>failing fits: &lt;3 / 3&ndash;5 / &gt;5 / &gt;10</td><td class="n">~45% / ~21% / ~33% / ~12&ndash;17%</td></tr>
+</table>
+<p>The noise model is fine (passes at ~0.9), so this is <em>not</em> a noise underestimate. The failures are a spectrum of
+<strong>mild-to-severe high-T morphology misfit</strong>: the real intensity curves genuinely deviate from the bump+pedestal model at the
+small pair-noise error level. Even the &ldquo;mild&rdquo; &lt;3 bucket is, at dof&asymp;15, statistically incompatible with the quoted errors
+&mdash; <em>not</em> a harmless Wilks quirk. The forward grid <strong>injects data FROM the model</strong>, so it can never reproduce these
+rejections &mdash; hence the optimism. (Amplitude checked: pump amplitude is ~T-independent, ~1650&rarr;~1500&nbsp;e&minus; cold&rarr;hot, so the
+gap is morphology, not a hidden amplitude drop.)</p>
+<div class="callout warn"><strong>Impact &amp; status.</strong> The completeness <strong>overestimates the high-T / long-&tau;<sub>135</sub>
+(&ldquo;hot-measured&rdquo;) reach by ~2&times;</strong> &mdash; the right arm of the curve/map. Distinct from the already-removed
+<code>survival(k)</code> (&sect;8A) and the legacy naive-dip pedestal misfit (&sect;8B, which minimal fixed). <strong>Action (in progress):</strong>
+investigate the per-temperature intensity GOF cut itself &mdash; whether <code>p_value&gt;0.05</code> should become a purity-calibrated
+<code>reduced_chi2&lt;X</code> &mdash; <em>before</em> any data-driven efficiency correction. A per-temperature empirical
+&epsilon;<sub>T</sub>=observed/predicted correction is a candidate (keyed to the real mechanism, unlike <code>survival(k)</code>, but still
+empirical) and is <strong>TABLED</strong> pending the cut study. Diagnostics: <span class="fileref">tools/holdout_high_t_test.py</span>,
+<span class="fileref">tools/pvalue_failure_diag.py</span>.</div>
+
+<p><strong>Step 0 residual audit (2026-06-17) &mdash; the high-T failures are two distinct populations</strong>
+(<span class="fileref">tools/residual_audit_step0.py</span> + model-independent validation; codex5.5-reviewed):</p>
+<table>
+<tr><th>population</th><th class="n">share</th><th>evidence</th><th>nature</th></tr>
+<tr><td><strong>Real signal loss</strong> (no-bump + &tau;-inconsistent)</td><td class="n">~40&ndash;50% (&uarr;T)</td>
+    <td>raw curve flat: max 1.7&ndash;1.8&sigma; from a constant, 0 points &gt;3&sigma;, fitted amp ~70&nbsp;e&minus; (vs ~1600 cold)</td>
+    <td><strong>genuine non-detection</strong> &mdash; cold amplitude does NOT transfer to high&nbsp;T; not cut-recoverable</td></tr>
+<tr><td><strong>Real bumps failing GOF on shape</strong> (coherent/outlier/mild)</td><td class="n">~50&ndash;60%</td>
+    <td>strong bump 13&ndash;25&sigma;, amp ~1600&nbsp;e&minus;, fitted &tau; matches SRH to 0.02&ndash;0.05&nbsp;dex</td>
+    <td><strong>cut-recoverable</strong> &mdash; &tau; is reliable; only the curve-shape likelihood is rejected. Relaxing the GOF lifts the high-T rate ~0.44&rarr;~0.78</td></tr>
+</table>
+<div class="callout key"><strong>Direction (codex5.5-endorsed) &mdash; two separate tracks, do not collapse into one fix.</strong>
+<strong>Track 1 (priority):</strong> recover the real-&tau;-correct bumps by replacing per-temperature <code>p_value&gt;0.05</code> with a
+<em>purity-calibrated</em> <code>reduced_chi2&lt;X</code> (or robust-residual) cut, keeping amp-significance / &Delta;&chi;&sup2; / &tau;-rel-error,
+validated against trap-free AND structured-null controls and against downstream E/&sigma; SRH quality (protect &tau;; coeff/amp may shift).
+Use SRH &tau;-consistency only to <em>validate</em> recoveries, never as a production cut (it would bake Arrhenius into selection).
+<strong>Track 2:</strong> the signal-loss population is real non-detection that invalidates the grid's high-T amplitude assumption &mdash;
+model the high-T amplitude/visibility loss or bound it; it affects only the long-&tau;<sub>135</sub> (hot-measured) arm. Open validations:
+the cold&rarr;high-T amplitude mapping vs Stage&nbsp;9, first-delay compression in &ldquo;in-window&rdquo;, and coordinate/registration stability at high&nbsp;T.</div>
+
+<h3>Naive-efficiency closure re-run on the minimal catalog (2026-06-18) &mdash; the dip is now amplitude-significance, not p-value</h3>
+<p>Re-ran Stage&nbsp;11 (<span class="fileref">naive_efficiency_closure.py</span>) and <span class="fileref">observed_cutflow.py</span> on the
+<strong>minimal</strong> catalog (<span class="fileref">fit_dipole_spectra_minimal_caldet_err_4.h5</span>, 3,798 traps) and compared to the legacy
+summary. Cheap: the minimal Stage-08 grid covers &tau; 2e-5&ndash;20&nbsp;s, so the dip window (3e-3&ndash;3e-2&nbsp;s) is fully in range &mdash;
+no grid rebuild. Dip window = &tau;<sub>e</sub>(T) 3e-3&ndash;3e-2&nbsp;s:</p>
+<table>
+<tr><th>Dip window</th><th class="n">Legacy</th><th class="n">Minimal</th></tr>
+<tr><td>Observed naive efficiency (dip)</td><td class="n">0.128</td><td class="n"><strong>0.414</strong></td></tr>
+<tr><td>Amplitude-only prediction (PC(T), no GOF)</td><td class="n">0.943</td><td class="n"><strong>0.943</strong></td></tr>
+<tr><td>Hybrid (&times; bright in-window p-value survival)</td><td class="n">0.176</td><td class="n">0.676</td></tr>
+<tr><td>Bright in-window p-value survival @195K</td><td class="n">0.16</td><td class="n"><strong>0.77</strong></td></tr>
+<tr><td>Hybrid closure &chi;&sup2;/bin</td><td class="n">135</td><td class="n"><strong>784</strong></td></tr>
+</table>
+<div class="callout key"><strong>The two &ldquo;amplitude&rdquo; meanings &mdash; this is what reconciles the &ldquo;is it amplitude or the p-value cut?&rdquo; confusion.</strong>
+<ul>
+<li><strong>(1) The smooth global amplitude decline</strong> &mdash; PC(T) (the Stage-5 &ldquo;Temperature scaling&rdquo; factor, ~1.0&rarr;0.65 peak&rarr;210K).
+<strong>Real but NOT the dip:</strong> the amplitude-only prediction is <strong>0.943 on BOTH catalogs</strong> &mdash; at 0.65&times; the grid still detects
+(p<sub>det</sub>~0.94). The gentle measured slope is too mild to carve a dip.</li>
+<li><strong>(2) Per-trap catastrophic high-T fading</strong> &mdash; the Step-0 POP1 subpopulation whose bump collapses to ~70&nbsp;e&minus; (factor ~20,
+not 1.5&times;). <strong>This IS part of the dip</strong>, and PC(T) cannot see it (PC is fit on survivors only).</li>
+</ul>
+&ldquo;Amplitude is the issue&rdquo; meant (2); &ldquo;amplitude is not the issue&rdquo; meant (1). Both are correct.</div>
+<p><strong>Three layers, peeled one at a time</strong> (so the earlier diagnoses were never contradictory &mdash; the model change moved the dominant
+failure mode):</p>
+<table>
+<tr><th>Layer</th><th>Dominant high-T failure</th><th>Status</th></tr>
+<tr><td><strong>Legacy</strong></td><td>per-T <code>p_value</code> GOF cut firing because the through-zero model cannot fit the high-T pedestal</td>
+    <td>&ldquo;p-value cut is the problem&rdquo; &mdash; <strong>correct for legacy</strong>; fixed by the minimal pedestal model (survival 0.16&rarr;0.77 @195K, dip 0.13&rarr;0.41)</td></tr>
+<tr><td><strong>Minimal (now)</strong></td><td><code>amplitude_significance &lt; 3</code> (faintness) &mdash; ~55% of failures; <code>p_value</code> only ~28%</td>
+    <td>the pedestal fix <strong>peeled off the p-value layer and exposed the amplitude layer</strong></td></tr>
+<tr><td><strong>Underneath</strong></td><td>is the faintness real fading (POP1), shape-failing real bumps (POP2), or pedestal-DOF cost?</td>
+    <td><strong>OPEN</strong> &mdash; the (a)/(b)/(c) split below</td></tr>
+</table>
+<div class="callout warn"><strong>On minimal the hybrid now OVER-predicts: 0.676 vs observed 0.414</strong> (gap 0.26; closure &chi;&sup2;/bin worsened 135&rarr;784).
+The two-factor model does <strong>not</strong> close the minimal dip. Cause: the hybrid rescales by the <em>bright, in-window</em> p-value survival
+(now high+flat, 0.68&ndash;0.82 across 170&ndash;210K), so it conditions OUT the <code>amplitude_significance</code> failures that now dominate.
+That residual = POP1 / the &sect;9 &ldquo;~2&times; optimism,&rdquo; surfaced quantitatively, and is tied to <strong>survivor-biased PC</strong> (true high-T
+amplitude &lt; good-fit-only PC &rarr; more sub-3&sigma; failures than the grid predicts).</div>
+<div class="callout key"><strong>Completeness overclaim (confirmed direction).</strong> <span class="fileref">plot_completeness_overlay(m3)</span> is built from the
+forward grid, which is fed survivor-biased PC and injects data from its own model &rarr; it predicts ~0.94 detectability at high&nbsp;T where reality
+is ~0.45. <strong>The completeness figure overclaims at the high-T / long-&tau;<sub>135</sub> (&ldquo;hot-measured&rdquo;) arm</strong> &mdash; the right edge of
+the overlay. The amount of overclaim <em>is</em> the genuine-fading share (a) below, so measuring the split also bounds the overclaim.</div>
+
+<h3>Open work: split the high-T faint failures into (a) fading / (b) shape-fail / (c) pedestal-DOF cost</h3>
+<p>Step 0 split only the <em>bright</em> cohort. The naive dip is <em>faint</em>-population-dominated, so the (a)/(b)/(c) composition of the faint
+high-T failures &mdash; and how much is recoverable vs genuine incompleteness &mdash; is not yet measured. Targets:</p>
+<ul>
+<li><strong>(a) Genuinely fading traps</strong> (real incompleteness, <em>stays</em> in completeness): raw cold-normalized contrast (max&minus;min /
+curve area) at the actual sampled delays vs the cold prediction, at the <em>fixed cold (row,col)</em> incl. the failed high-T points
+(forced photometry; survivor-free PC). Guard with coordinate/registration stability so a drifted coordinate does not fake fading.</li>
+<li><strong>(b) Strong real bumps failing the shape cut</strong> (POP2; recoverable): coherent/outlier residual structure with &tau; matching SRH &mdash;
+target of the <code>reduced_chi2&lt;X</code> recovery, FPR-controlled.</li>
+<li><strong>(c) Pedestal-DOF cost</strong> (partly recoverable): coeff&harr;offset correlation and <code>amplitude_significance</code> before/after constraining
+the pedestal &mdash; real contrast present but the offset DOF inflates &sigma;<sub>coeff</sub> below 3&sigma;.</li>
+</ul>
+<p>Decisive closure test: feed survivor-free PC(T) through the existing minimal grid and re-run Stage&nbsp;11; if the 0.26 over-prediction gap closes,
+the residual dip is accounted for by (a)+(c)+(b) with no exotic mechanism, and the (a) share is the completeness-overclaim bound.</p>
+
+<h2 id="v-status">10. Net conclusions, status &amp; as-built reference</h2>
+<div class="callout key">
+<ul>
+<li><strong>Detection/selection:</strong> minimal catalog = 2,928 traps, FPR ~0.01%, SER tail unchanged vs legacy.</li>
+<li><strong>Method-3 completeness</strong> = the WS1-corrected intensity reach <code>P(&ge;4 good intensity)</code> &times; the measured ~0.96
+energy-fit factor (minimal). No survival(k), no forward grid.</li>
+<li><strong>Minimal is the headline;</strong> legacy is a reference (&tau; errors ~1.7&times; optimistic).</li>
+<li><strong>Rerun:</strong> both grids stale post-WS1 &rarr; <code>run_chain.py --flavor {legacy,minimal_caldet} --fresh-grid</code> once.
+An SRH &chi;&sup2;-threshold change is catalog-only &rarr; regenerate catalog, then <code>--reuse-grid</code> (01/05/09/10).</li>
+</ul></div>
+<h3>As-built code reference</h3>
+<pre>Injection  full_pdet_grid_pilot.py:295-353  _simulate_grid_point  (loaders :158 pair-noise, :175 pedestal, :273 _minimal_intensity_err)
+  true_offset = rng.choice(pedestal_lookup[T])               # signed fit_offset pool, BOTH flavors
+  minimal err = sqrt(sigma_base(T,q)**2 + |true_intensity|/4)   # sigma_base ~36 e- ; legacy err = patch sigma ~183 e-
+  if legacy: noisy = np.abs(true + N(0,err))                  # signed->abs (dipole.py absolute=True)
+Energy fit  dipole.py:442 / dipole_new.py:524  fit_energy_cross_section(...)
+  GoodEnergyFit: reduced_chi2 < 4 (minimal) / < 5 (legacy); reject E<=1e-5 or E>10 or log_sigma at boundary
+Final catalog  audit_hdf5_records.py:77-83  WellBehavedTrap & !EnergyFitFailed & GoodEnergyFit & OrientationConsistent
+Lean check  tools/energy_fit_recovery_check.py --flavor {minimal_caldet, legacy}
+Figures     figure_utils.py  plot_completeness_map / plot_completeness_map_caught_at_T(color_scalar=mean|median|max)
+Env         sensei_charge_traps_new</pre>
+
+</div><!-- /tab-validation -->
+
+</div>
+<script>
+function showTab(id, btn){
+  document.querySelectorAll('.tab-panel').forEach(function(p){p.classList.remove('active');});
+  document.querySelectorAll('.tabbtn').forEach(function(b){b.classList.remove('active');});
+  document.getElementById('tab-'+id).classList.add('active');
+  btn.classList.add('active');
+  window.scrollTo(0,0);
+}
+</script>
+</body>
+</html>

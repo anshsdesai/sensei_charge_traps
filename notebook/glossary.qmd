@@ -1,0 +1,312 @@
+---
+title: "Glossary — plain-language definitions"
+---
+
+
+Every term, symbol, and piece of project shorthand used in the notebook, in plain words. If a
+notebook file uses something you don't recognize, it's defined here. Organized by topic, not
+alphabetically, so related ideas sit together.
+
+---
+
+## The physics being measured
+
+- **Charge trap (or "trap").** A defect in the silicon crystal that can grab a passing electron,
+  hold it for a while, then let it go. That "let it go later" is the whole problem: an electron
+  released long after the event that created it looks like a fresh single-electron signal.
+
+- **Emission time, τ (tau), sometimes τ_e.** The average time a trap holds an electron before
+  releasing it. Short τ = releases almost immediately; long τ = holds for hours, days, or longer.
+  τ depends on temperature — warmer silicon releases faster.
+
+- **τ135 (tau at 135 K).** The emission time τ *extrapolated to 135 K*, the operating temperature of
+  the SENSEI experiment at SNOLAB. This is the axis that matters for the science, because a trap's
+  danger is set by how long it holds charge at the operating temperature. Most traps are measured at
+  *other* temperatures and τ135 is computed from a fitted model — so a "long-τ135" trap was usually
+  never actually watched at 135 K (see "Arrhenius / SRH extrapolation").
+
+- **Energy E and cross-section σ (sigma).** The two numbers that define a trap. **E** (in eV) is how
+  deep the trap is — deeper traps hold charge longer. **σ** (an area, in cm²) is how big a target the
+  trap presents to a passing electron — bigger σ = more likely to catch one. Together with
+  temperature they predict τ at any temperature.
+
+- **SRH (Shockley–Read–Hall).** The standard textbook model for how defects capture and emit charge
+  carriers. It gives the formula `τ = exp(E/kT) / (σ · v_th · N_v)` linking a trap's τ to its E, σ,
+  and the temperature T. "The SRH law" and "the Arrhenius fit" refer to fitting this to a trap's
+  measured τ-vs-temperature points to extract E and σ.
+
+- **Arrhenius extrapolation.** Because τ changes with temperature in a known (SRH) way, you can fit
+  the trend and extend it to a temperature you never measured — how τ135 is obtained for traps that
+  were only detectable when hot.
+
+- **v_th, N_v, detailed balance (the pieces inside the SRH formula).** `v_th` = the typical thermal
+  speed of a carrier; `N_v` = a temperature-dependent count of available quantum states ("effective
+  density of states"). "Detailed balance" is the equilibrium principle that fixes the ratio of capture
+  to emission; it's how the SRH formula is derived. You rarely need these directly — they're bundled
+  constants.
+
+- **Two-state / Markov kinetics.** The math for a trap that is either "empty" or "occupied" and hops
+  between the two at capture and emission rates. "Exact two-state transition probability" just means
+  the correct formula for the chance of ending a time-step occupied, allowing for multiple hops within
+  the step — as opposed to a cruder one-shot approximation.
+
+- **Holes vs electrons.** SENSEI's CCDs are "p-channel," meaning the mobile charge carriers are
+  *holes* (missing electrons) rather than electrons. The physics is the same; it only changes which
+  material constants go into the formulas. The notebook says "carriers" to stay agnostic.
+
+- **Pocket pumping.** The measurement technique. Fill the whole sensor with a roughly uniform sheet
+  of charge, then shuffle it back and forth thousands of times. A trap at the right spot repeatedly
+  steals charge from one pixel and drops it in the neighbor, building up a visible signature.
+
+- **Dipole.** That signature: two stacked pixels, one darker than average and the one just below it
+  brighter by the same amount (charge stolen from one, dropped into the other). The finder hunts for
+  these. "Dipole intensity" = how much charge got moved.
+
+- **t_ph (pump dwell / phase time; `dtph` in filenames and stage tables).** The tunable delay of the
+  pocket-pumping clock: how long the charge parks on one side of a trap during each pump cycle before
+  being shuffled back. Each pumping image is taken at one t_ph; scanning it (~80 µs up to ~1 s, in
+  15 MHz sequencer ticks — that tick count is the `dtph` in filenames) traces out the
+  intensity-vs-delay curve whose shape measures the trap's emission time τ. The model's emission
+  window is `[t_ph, 8·t_ph]` because the opposite park lasts 7× longer (the pump duty ratio).
+
+- **Clock phases / gates (V1, V2, V3).** Each pixel is covered by three electrodes ("gates" or
+  "phases"); raising and lowering their voltages in sequence is what moves charge from row to row
+  ("clocking"). Which gates hold the charge during exposure, between transfers, and during pumping
+  is set by the sequencer recipes (`daq/*.xml`) — and it matters, because a trap sits under one
+  specific gate, and that determines how long it sees charge and whether pumping can detect it at
+  all. In the current simulation kernel, "V1 trap" vs "V3 trap" distinguishes whether the packet
+  crosses the trap on the way *into* or *out of* a row transfer. One polarity subtlety: these are
+  **p-channel** CCDs (the carriers are holes), so the charge collects under the most *negative* —
+  i.e. the **non-asserted** — gate in a sequencer state; during readout the holes rest under V2 and
+  V1/V3 are the barriers (see [physics](physics.qmd) §2.4 for the full gate-role derivation).
+
+- **Dark current.** Charge that accumulates in a pixel over time even with no light, from thermal
+  effects. It grows quickly as the sensor warms up, which is why high-temperature images are noisier
+  and have the "pedestal" problem below.
+
+- **Single electron / 1e⁻ / SER.** The dark-matter search looks for pixels containing exactly one
+  electron. **SER** = "single-electron rate," how many such pixels appear per pixel per image. Traps
+  are a worry because a released trapped electron adds a fake 1e⁻ count. The whole project asks: how
+  much do traps shift the SER?
+
+- **Pedestal (readout-deferral / CTI pedestal).** A constant, always-present dipole that a trap
+  makes *during readout* (not during pumping) by deferring some of the dark-current background as it
+  is clocked past. It grows with temperature. It matters because the old fit model had no place to
+  put it, so it corrupted the fits at high temperature — the central discovery of the signed-refit
+  thread. **CTI** = "charge transfer inefficiency," the general phenomenon of charge getting left
+  behind during clocking.
+
+- **V_p (packet volume, `--packet-volume-um3`).** The effective volume (in cubic microns, ~1–10, code
+  default 3) that a single electron explores inside a pixel well. The simulation needs it to turn a
+  cross-section into a capture *rate* (rate needs a density = charge / volume). It is not directly
+  measured, so it is carried as a systematic uncertainty (a knob varied to bracket the answer).
+
+- **Quadrant.** A CCD is read out through four corner amplifiers (UL/UR/LL/LR), dividing it into four
+  quadrants. Each has slightly different noise and dark current, so many quantities are tracked
+  per-quadrant. Indices 0–3.
+
+---
+
+## The catalog: two analysis pipelines
+
+- **Legacy pipeline (`dipole.py`).** The original analysis. Simpler, but its fit model breaks above
+  ~165 K. Kept as a comparison baseline.
+
+- **Minimal pipeline (`dipole_new.py`).** The corrected analysis used going forward. "Minimal"
+  because it is the *smallest* set of physically-required fixes to the legacy method — not a
+  ground-up rewrite. Turned on with `--pipeline minimal`. See [dipole_algorithm](dipole_algorithm.qmd).
+
+- **"caldet" / `minimal_caldet`.** Short for "calibrated detection." The minimal pipeline run with
+  `--detection calibrated` (the honest, data-measured detection threshold rather than a fixed
+  guessed number). The current production catalog file is `fit_dipole_spectra_minimal_caldet_err_4.h5`.
+
+- **Finder.** The first stage: scans images for dipole-shaped pixel pairs and produces a list of
+  candidate trap locations. Finding a candidate is *not* the same as confirming a trap.
+
+- **Characterized / well-behaved trap.** A candidate that survived all the quality cuts: it was
+  cleanly measured at enough temperatures (≥4) and its τ-vs-temperature points fit the SRH law. Only
+  characterized traps enter the catalog and seed the simulation. ("Well-behaved" specifically = the
+  ≥4-good-temperatures requirement.)
+
+- **Good temperature / good fit.** A trap counts as measured "well" at one temperature if its
+  intensity-vs-delay curve passes the per-temperature cuts there. A trap needs ≥4 good temperatures
+  to be characterized.
+
+- **Signed vs absolute intensity.** The legacy method threw away whether a dipole pointed up or down
+  (took the absolute value). The minimal method keeps the sign, because a real trap always pumps in
+  the same direction — a sign that flips across temperatures reveals contamination.
+
+- **Orientation consistency.** The cut that uses the sign: a single real trap's significant
+  temperatures should all share one sign. Mixed signs → flagged as contamination
+  (`dual_response`, `ambiguous_sign_conflict`) and rejected.
+
+- **Decoy / decoy control.** A deliberately fake "trap" (a random or wrong-shaped location) run
+  through the whole pipeline to measure how often junk sneaks into the catalog. Shows that *detection*
+  alone is a weak filter but full *characterization* rejects ~97–99% of decoys.
+
+- **Calibrated detection threshold.** Instead of guessing how strong a signal must be to count as
+  real, measure it: run the exact fit on thousands of empty (trap-free) control locations and set the
+  bar where only 0.1% of pure noise would pass, separately for each temperature. See
+  [dipole_algorithm](dipole_algorithm.qmd) §3.1.
+
+---
+
+## The simulation
+
+- **MINOS vs SNOLAB.** Two operating scenarios. MINOS (a shallower site) sees more high-energy
+  background events; SNOLAB (deep underground) sees ~10× fewer. The simulation runs both.
+
+- **HEE (high-energy event).** A bright track or blob from a cosmic ray or radioactive decay —
+  thousands of electrons, far above the single-electron signal. The simulation transplants them
+  from a real image. They matter twice over: they drive the masking, and they are the main charge
+  source that *fills the traps* (occupancy), which sets the scale of the trap effect.
+
+- **Trap branch vs no-trap branch.** Every simulated exposure is run twice with the *same* injected
+  charge — once with traps, once without. Subtracting the two isolates the trap effect and cancels
+  the shared randomness ("common random numbers").
+
+- **Exposure-dependent vs exposure-independent (slope vs intercept).** The single-electron rate is
+  fit as `rate = intercept + slope × exposure_time`. The **intercept** ("exposure-independent") is
+  the part present even in a zero-length exposure; the **slope** ("exposure-dependent") is the part
+  that grows with how long the sensor collects. Traps affect both.
+
+- **Masking.** The real experiment discards pixels near bright events and noisy columns before
+  counting single electrons. The simulation reproduces this (via `hotcol.py`) so the "masked" trap
+  excess is what actually survives into the science result — usually far smaller than the raw excess.
+
+- **Upper-limit population.** Because the measurement misses some faint/hidden traps, the simulation
+  is also run with an *inflated* trap population (efficiency-corrected, 90%-confidence). This is a
+  "what if the true population were this large" bound, not a measured number. ~17,500 traps vs ~3,800
+  characterized.
+
+- **Deviation budget.** A line-by-line accounting of *every* reason the simulated single-electron
+  count differs from the injected truth — each with a formula, a sign (does it add or subtract
+  electrons?), and how it changes with exposure time. The point is to understand the trap effect as a
+  sum of named, physical mechanisms rather than one opaque number. It is [physics](physics.qmd) §4.
+
+- **Instrumented run / kernel.** A special simulation run where every electron is tagged and its fate
+  tracked (captured, emitted, re-captured, masked, lost…). Used to *directly measure* the mechanisms
+  in the deviation budget instead of only reasoning about them. The "kernel" is the resulting measured
+  response.
+
+- **Clear modes (`--clear-mode`).** How the sensor is reset between simulated images:
+  `sequencer` (the realistic default), `three_hour` (a long 3-hour drain), `binned_0h` (no clear),
+  `instantaneous` (an idealized legacy option). They differ in how much trapped charge survives to the
+  next image. Detailed in `CLAUDE.md`.
+
+- **The three recapture models (physics history — know which is current).** How the simulation treats
+  a trap capturing charge during readout went through three versions: **Model A** (no recapture —
+  made 97% of traps inert, wrong), **Model B** (full-row recapture — too strong, contradicted the
+  pumping data), and **Model C = `phase_limited_v1v3`** (capture only in a brief 20-microsecond
+  window as charge crosses the trap — **the current, live model**). See [physics](physics.qmd) §2.
+
+---
+
+## The completeness study
+
+- **Completeness.** "Did we catch the traps that exist?" Specifically, the probability that a trap of
+  a given τ135 and energy would have been detected and characterized if it were there. The worry is a
+  large *hidden* population of long-lived traps.
+
+- **Survivorship (selection) bias.** The trap that breaks the naive method: if you estimate "how
+  complete are we?" using only the traps you already caught, you are blind to the ones you missed by
+  construction. The whole point of Method 3 is to escape this.
+
+- **Method 1 / 2 / 3.** Three approaches to completeness. Method 1 (efficiency ratio) is in the
+  original paper and is survivorship-biased. Method 2 (band coverage) is a stepping stone. **Method 3**
+  (analytic injection-recovery) is the chosen one. See [completeness_efficiency](completeness_efficiency.qmd).
+
+- **Injection-recovery.** Plant fake traps of known properties into realistic simulated data, run the
+  real pipeline, and see what fraction come back. The recovered fraction is the detection efficiency —
+  measurable *without* reference to the real trap population, which is how it dodges survivorship bias.
+
+- **p_det.** The output of injection-recovery: the probability of detecting a trap of a given
+  emission time and brightness at a given temperature.
+
+- **Amplitude prior.** The assumed distribution of trap brightnesses, calibrated from the brightest
+  (least-biased) measured traps. It is the one remaining place the real population sneaks into
+  Method 3, so it is isolated and stress-tested ("faint-by-2 / faint-by-4" variants).
+
+- **D_t and P_c (the pieces of a dipole's amplitude).** The fitted pump amplitude decomposes as
+  `A = N_pumps · D_t · P_c`: **N_pumps** = 3,000 pump cycles per image; **D_t** = the trap "depth,"
+  how much charge it moves per cycle when it fires; **P_c** = the probability the trap actually
+  captures a carrier in a given cycle. `P_c(T)` falling at high temperature is a *real* warm-T
+  incompleteness signal (Stage 05 of the completeness chain).
+
+- **Poisson-binomial.** The bit of math that combines per-temperature detection probabilities into
+  "probability of ≥4 successes across 23 temperatures." (A binomial where each trial has a different
+  success probability.)
+
+- **WS1 / WS2 / WS3 (work-streams).** Three fixes to the Method-3 implementation. **WS1** = the
+  noise-injection bug fix (was injecting the wrong noise level). **WS2** = sharing one identical
+  energy-fit function between the live code and the forward model. **WS3** = the check (later retired
+  as unnecessary) of whether the energy-fit step erodes completeness; conclusion was that it costs
+  only ~4%. See [completeness_efficiency](completeness_efficiency.qmd) §5.
+
+- **POP1 / POP2.** Two populations of high-temperature fit failures found in the residual audit.
+  **POP1** = genuinely faded traps (real signal loss — a true incompleteness). **POP2** = real traps
+  whose curve shape trips the goodness-of-fit cut but whose τ is fine (recoverable). Distinguishing
+  them bounds how much the completeness is over-claimed.
+
+- **The "naive dip."** A dip in the paper's original efficiency curve at high temperature that looked
+  alarming. Shown to be mostly an artifact of an over-strict statistical cut, not a real loss of
+  sensitivity. See [completeness_efficiency](completeness_efficiency.qmd) §6.
+
+- **survival(k).** A discarded correction factor (keyed on a trap's good-temperature count) that
+  created a spurious dip in one completeness curve by mixing up "did we catch it" with "is it
+  contamination." Removed from the code.
+
+---
+
+## Statistics terms
+
+- **Goodness-of-fit (GOF).** A test of whether a fitted curve actually describes the data. Two are
+  used: a **p-value** and a **reduced χ²** (see next two).
+
+- **χ² (chi-squared) and reduced χ².** χ² measures total mismatch between a fit and the data (scaled
+  by the error bars). **Reduced χ²** divides by the degrees of freedom; ≈1 means "fits as well as the
+  noise allows," ≫1 means "the model is wrong or the errors are underestimated."
+
+- **dex.** A factor of ten on a logarithmic scale: "0.1 dex" means a factor of 10^0.1 ≈ 1.26,
+  "1 dex" a factor of 10. Used throughout for offsets in log τ (e.g. "the hot points sit
+  0.14 dex below the line" = a factor ~1.4 short).
+
+- **Degrees of freedom (dof).** The number of data points minus the number of fitted parameters. A
+  subtle but important point in this project: a p-value cut gets *stricter* as you add more data
+  points (more dof), which perversely throws away the *best-measured* traps — the reason the project
+  switched to a reduced-χ² cut, which doesn't have that problem.
+
+- **p-value.** The probability of seeing data at least this discrepant if the model were correct. A
+  common cut is "reject if p < 0.05," but here that cut was shown to be biased (see dof, above).
+
+- **False-positive rate (FPR).** How often pure noise (a trap-free location) passes as a real
+  detection. The calibrated catalog targets ~0.1% per temperature and achieves ~0.01% overall.
+
+- **Selection / Malmquist bias.** A bias created by selecting on a noisy measured quantity near a
+  boundary. Here: keeping only cold-temperature traps whose noisy τ happens to land inside the
+  measurable window biases the surviving τ values short, which tilts the fitted energy. Named after
+  the analogous effect in astronomy (brighter objects preferentially detected).
+
+- **Wilks' theorem.** The statistical result that *justifies* treating a certain fit-improvement
+  statistic as a standard χ². It requires "regularity" conditions that are violated here (a parameter,
+  τ, becomes undefined when the signal is zero), which is why a fixed "3-sigma" threshold was wrong
+  and had to be replaced by a directly-measured one.
+
+- **Look-elsewhere effect.** If you scan many possibilities (here, many candidate τ values) and keep
+  the best, you get a good-looking result by chance more often than a single test would. Must be
+  accounted for when setting thresholds.
+
+- **GLS (generalized least squares) / profile fit.** GLS = a fit that accounts for correlated noise.
+  "Profile fit in τ" = instead of fitting all parameters at once (which can get stuck), step through
+  a grid of fixed τ values, solve the easy linear part at each, and keep the best — robust against the
+  fit landing in a bad local minimum.
+
+- **Overdispersion (φ, phi).** A fudge factor multiplying the expected noise to make it match the
+  observed scatter. In the signed-refit thread the data demanded φ = 8–30×, which was a red flag that
+  the noise model was wrong rather than a legitimate small correction — a key reason the full
+  machinery was rejected.
+
+- **absolute_sigma / errors_are_absolute.** A fitting-library setting. When off (the legacy bug), the
+  fit quietly rescales the reported uncertainties by the fit quality, corrupting every downstream
+  significance cut. When on, the supplied error bars are trusted as real. The minimal pipeline turns
+  it on.

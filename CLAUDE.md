@@ -35,8 +35,9 @@ No test suite, no linter configured. Notebooks ([charge_trap_analysis.ipynb](cha
 ## Architecture notes
 
 **Before touching trap physics** (`fast_readout_numba`, `charge_trap_interaction`,
-`log_energy_cross_section`) read [notebook/physics.md](notebook/physics.md) (start at
-[INDEX.md](INDEX.md)) — it records the SRH model, the three successive recapture models (the current
+`log_energy_cross_section`) read the **Simulation physics** page of the Quarto lab notebook
+([notebook/physics.qmd](notebook/physics.qmd); start at
+[index.qmd](notebook/index.qmd)) — it records the SRH model, the three successive recapture models (the current
 one is `phase_limited_v1v3`), the V_p/σ systematics, the constants-fix history, the instrumented
 deviation budget, and all confirmed operating-condition decisions.
 
@@ -67,7 +68,7 @@ Both [run_charge_traps.py](run_charge_traps.py) and the notebooks follow a `try:
 ### Clear modes
 `clear_mode` (`--clear-mode`, persisted to the HDF5 `clear_mode` attr) selects the per-image reset run at the top of `take_fake_image` via `CCD.simulate_clear`. All modes retain trap occupancy across images; they differ in how free surface charge is handled and how much extra SRH trap interaction the reset adds:
 - `instantaneous` (legacy) — no transport; just zeroes free surface charge.
-- `sequencer` (**default**) — transports the resident image charge out through the real `temp_scan_run1_clearseq.xml` recipe (1500 fast + 10 slow vertical shifts; per-shift dwells built from the 15 MHz sequencer ticks) running full SRH per row transit (`fast_clear_numba`), then zeroes the free charge.
+- `sequencer` (**default**) — transports the resident image charge out through the real `daq/temp_scan_run1_clearseq.xml` recipe (1500 fast + 10 slow vertical shifts; per-shift dwells built from the 15 MHz sequencer ticks) running full SRH per row transit (`fast_clear_numba`), then zeroes the free charge.
 - `three_hour` — the `sequencer` transport (flushes the image) followed by an analytic continuous-fast-shift drain for 3 h over `N = round(3 h / clear_fast_dwell_s) ≈ 14.7 M` fast shifts (`drain_traps_empty_numba`, `clear_three_hour_fast_shifts`). Once the image is flushed every packet is empty, so a free trap cannot capture; occupied **V1** traps drain recapture-free, `1−exp(−T/τ)`, while **V3** traps drain recapture-thinned, `1−exp(−T·e^{−α}/τ)` — each V3 emission joins the passing packet and faces the same-gate recapture roll on exit, independent of shift speed. Models the long-clear data-taking strategy.
 - `binned_0h` — **no clear at all** (`simulate_clear` is a no-op). The schedule drops the nominal 0 h slot; instead a binned 0 h image is taken after every real exposure (`[4, 6, 10, 20] h`, 1:1 interleave → 800 images/run, 400 of them 0 h). The binned 0 h readout uses a shorter per-row dwell `tpix_vertical / binning_0h_factor` (`--binning-0h-factor`, default 32 — distinct from the global `--binning`), so it clocks faster, resets the array in place of the clear, and serves as the 0 h baseline; charge can still be trapped during that readout. `binning_0h_factor` is saved to HDF5.
 

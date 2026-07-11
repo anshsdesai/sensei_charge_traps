@@ -29,25 +29,24 @@ trap_completeness_method3/
 ## Canonical Inputs
 
 - Raw pocket-pumping images: `../proc/*.fits`
-- Primary characterized-trap file: `../fit_dipole_spectra_err_4.h5`
-- Sensitivity comparison file: `../fit_dipole_spectra_err_3.h5`
+- Characterized-trap catalog — flavor-selected via `src/analysis_flavors.py`
+  (the chain runs per flavor; `run_chain.py --flavor {minimal_caldet,legacy}`,
+  default `minimal_caldet`):
+  - `minimal_caldet` (default): `../fit_dipole_spectra_minimal_caldet_err_4.h5`
+    (`n_good = 4`) / `..._err_3.h5` (`n_good = 3`), built by the minimal `dipole_new.py` pipeline
+  - `legacy`: `../fit_dipole_spectra_err_4.h5` / `..._err_3.h5`, built by `dipole.py`
 - Dipole coordinates: `../dipole_coord_list.npz`
-- Core analysis code: `../dipole.py`, `../utils.py`
+- Core analysis code: `../dipole.py` (legacy) / `../dipole_new.py` (minimal), `../utils.py`
 - Conceptual parent document: `../trap_completeness_method.md`
 
 ## Canonical Runtime
 
-Use the WSL conda environment `sensei_charge_traps`, not the Windows-side
-`sensei_charge_traps_new` environment. Preferred command:
+Use the conda environment `sensei_charge_traps_new` (the project-wide standard;
+the old `sensei_charge_traps` / `requirements.yaml` name is deprecated). Preferred
+command:
 
 ```bash
-/home/ansh/miniforge3/bin/conda run -n sensei_charge_traps python <script>.py
-```
-
-The environment's Python executable is:
-
-```bash
-/home/ansh/miniforge3/envs/sensei_charge_traps/bin/python
+conda run -n sensei_charge_traps_new python <script>.py
 ```
 
 ## Canonical Assumptions

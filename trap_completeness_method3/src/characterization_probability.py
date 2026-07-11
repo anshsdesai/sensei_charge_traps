@@ -31,6 +31,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from dipole import log_energy_cross_section  # noqa: E402
+from trap_completeness_method3.src.analysis_flavors import get_analysis_flavor
 
 
 DEFAULT_STAGE08_H5 = CACHE_DIR / "08_pdet_grid_v1.h5"
@@ -42,6 +43,7 @@ DEFAULT_STAGE01_NGOOD3_CSV = CACHE_DIR / "01_records_ngood3.csv"
 DEFAULT_OUTPUT_H5 = CACHE_DIR / "09_characterization_probability_v1.h5"
 DEFAULT_OUTPUT_SUMMARY = CACHE_DIR / "09_characterization_probability_summary.json"
 DEFAULT_SMOKE_SUMMARY = CACHE_DIR / "09_characterization_probability_smoke_summary.json"
+DEFAULT_SELECTION_SUMMARY = CACHE_DIR / "01_selection_summary.json"
 
 
 @dataclass(frozen=True)
@@ -83,6 +85,16 @@ class InterpolationPolicy:
     amplitude_below_grid: str = "zero"
     amplitude_above_grid: str = "edge_clipped"
     temperature_axis: str = "exact_measured_temperatures_only"
+
+
+@dataclass(frozen=True)
+class CatalogSelectionModel:
+    """Empirical full-catalog survival after the per-temperature GoodIntensityFit process."""
+
+    analysis_flavor: str
+    selection_summary_path: Path
+    survival_by_n_good: dict[int, np.ndarray]
+    metadata: dict
 
 
 def _jsonable(value):
@@ -462,6 +474,7 @@ def compute_probabilities_for_points(
     prior: AmplitudePrior,
     n_good_values: tuple[int, ...] = (4, 3),
     chunk_size: int = 256,
+    selection_model: CatalogSelectionModel | None = None,
 ) -> tuple[dict[int, np.ndarray], dict]:
     tau_135_seconds = np.asarray(tau_135_seconds, dtype=float).reshape(-1)
     energy_eV = np.asarray(energy_eV, dtype=float).reshape(-1)
@@ -481,8 +494,9 @@ def compute_probabilities_for_points(
     amp_interp = _prepare_amplitude_interpolation(stage08.amplitude_electrons, amplitudes_by_T_depth)
     log_tau_grid = np.log(stage08.tau_seconds)
 
-    max_n_good = max(n_good_values)
+    max_count = n_temperatures + 1
     probabilities = {n_good: np.empty(n_points, dtype=float) for n_good in n_good_values}
+    intensity_probabilities = {n_good: np.empty(n_points, dtype=float) for n_good in n_good_values}
     tau_below_count = np.zeros(n_points, dtype=np.int16)
     tau_above_count = np.zeros(n_points, dtype=np.int16)
     tau_oob_count = np.zeros(n_points, dtype=np.int16)
@@ -502,7 +516,7 @@ def compute_probabilities_for_points(
             energy_chunk,
             stage08.temperatures_K,
         )
-        dist = np.zeros((stop - start, n_depth, max_n_good), dtype=float)
+        dist = np.zeros((stop - start, n_depth, max_count), dtype=float)
         dist[..., 0] = 1.0
 
         for temp_index in range(n_temperatures):
@@ -530,8 +544,14 @@ def compute_probabilities_for_points(
             _update_truncated_count_distribution(dist, p_det)
 
         for n_good in n_good_values:
-            tail_by_depth = np.clip(1.0 - np.sum(dist[..., :n_good], axis=-1), 0.0, 1.0)
-            probabilities[n_good][start:stop] = np.mean(tail_by_depth, axis=1)
+            tail_by_depth = np.clip(np.sum(dist[..., int(n_good):], axis=-1), 0.0, 1.0)
+            intensity_probabilities[n_good][start:stop] = np.mean(tail_by_depth, axis=1)
+            if selection_model is None:
+                probabilities[n_good][start:stop] = intensity_probabilities[n_good][start:stop]
+            else:
+                survival = selection_model.survival_by_n_good[int(n_good)]
+                characterized_by_depth = np.tensordot(dist, survival, axes=([-1], [0]))
+                probabilities[n_good][start:stop] = np.mean(characterized_by_depth, axis=1)
 
     per_temperature = []
     for temp_index, temperature in enumerate(stage08.temperatures_K):
@@ -574,6 +594,8 @@ def compute_probabilities_for_points(
             "median": float(np.median(amplitudes_by_T_depth)),
             "max": float(np.max(amplitudes_by_T_depth)),
         },
+        "intensity_probabilities": intensity_probabilities,
+        "catalog_selection_model": None if selection_model is None else selection_model.metadata,
     }
     return probabilities, diagnostics
 
@@ -585,6 +607,7 @@ def make_probability_map(
     prior: AmplitudePrior,
     n_good_values: tuple[int, ...] = (4, 3),
     chunk_size: int = 256,
+    selection_model: CatalogSelectionModel | None = None,
 ) -> tuple[dict[int, np.ndarray], dict]:
     tau_mesh, energy_mesh = np.meshgrid(tau_135_grid, energy_grid, indexing="ij")
     probabilities, diagnostics = compute_probabilities_for_points(
@@ -594,10 +617,15 @@ def make_probability_map(
         prior,
         n_good_values=n_good_values,
         chunk_size=chunk_size,
+        selection_model=selection_model,
     )
     probability_maps = {
         n_good: values.reshape(tau_135_grid.size, energy_grid.size)
         for n_good, values in probabilities.items()
+    }
+    diagnostics["intensity_probability_maps"] = {
+        n_good: values.reshape(tau_135_grid.size, energy_grid.size)
+        for n_good, values in diagnostics.pop("intensity_probabilities").items()
     }
     diagnostics["tau_oob_fraction_map"] = (
         diagnostics["tau_oob_count"].reshape(tau_135_grid.size, energy_grid.size)
@@ -625,7 +653,7 @@ def default_tau_135_grid(
 
 
 def default_energy_grid(n_energy: int) -> np.ndarray:
-    return np.linspace(0.04, 0.70, n_energy)
+    return np.linspace(0.0, 0.70, n_energy)
 
 
 def load_known_traps(csv_path: Path = DEFAULT_STAGE01_CSV) -> dict:
@@ -656,11 +684,101 @@ def load_known_traps(csv_path: Path = DEFAULT_STAGE01_CSV) -> dict:
     }
 
 
+def _selection_summary_path_for_flavor(analysis_flavor: str) -> Path:
+    flavor = get_analysis_flavor(analysis_flavor)
+    if flavor.name == "legacy":
+        return DEFAULT_SELECTION_SUMMARY
+    return CACHE_DIR / f"01_selection_summary_{flavor.output_tag}.json"
+
+
+def load_catalog_selection_model(
+    analysis_flavor: str,
+    n_good_values: tuple[int, ...],
+    n_temperatures: int,
+    selection_summary_path: Path | None = None,
+) -> CatalogSelectionModel | None:
+    """Return empirical final-catalog survival factors, or None for legacy.
+
+    Stage 08 stores per-temperature detection probabilities. It does not store
+    synthetic per-temperature tau estimates, so Stage 09 cannot replay the full
+    SRH energy fit for every grid point from first principles. The minimal path
+    therefore applies the measured downstream catalog-survival fraction from the
+    Stage 01 fast summary, conditioned on exactly k good temperature fits.
+    """
+
+    flavor = get_analysis_flavor(analysis_flavor)
+    # Retired (2026-06-17): the empirical survival(k) multiply is no longer applied to the
+    # completeness headline for ANY flavor, so characterized completeness == the intensity
+    # reach P(>=4 good intensity fits). Why it was wrong:
+    #   * It is keyed only on the good-temperature count k, so its tau_135 projection is
+    #     non-monotonic -- it injected the spurious shoulder/dip into the completeness curve.
+    #   * It is final_catalog/total measured on the REAL (contaminated) catalog, so it folds
+    #     contamination rejection (blends, dual-response, high-T Arrhenius lean) INTO the
+    #     completeness -- i.e. it conflates completeness with purity.
+    #   * The lean injection-recovery (tools/energy_fit_recovery_check.py) measures the clean-
+    #     trap energy-fit (chi2) cost at a ~flat ~0.96 with calibrated sigma_tau; that small,
+    #     roughly constant haircut is not folded in here, and contamination is reported
+    #     separately as purity. Legacy was already None; this only changes minimal.
+    # The k-keyed survival code below is preserved (behind the toggle) for diagnostics only.
+    APPLY_SURVIVAL_K = False
+    if flavor.name == "legacy" or not APPLY_SURVIVAL_K:
+        return None
+    selection_summary_path = Path(selection_summary_path or _selection_summary_path_for_flavor(flavor.name))
+    if not selection_summary_path.exists():
+        raise FileNotFoundError(
+            f"Missing {selection_summary_path}. Build the fast catalog-selection artifact with:\n"
+            f"  python trap_completeness_method3/src/audit_hdf5_records.py --analysis-flavor {flavor.name}"
+        )
+    summary = _load_json(selection_summary_path)
+    counts_by_label = summary["selection_counts_by_good_temperature"]
+    survival_by_n_good: dict[int, np.ndarray] = {}
+    metadata: dict[str, dict] = {}
+    for n_good in n_good_values:
+        label = f"n_good_{int(n_good)}"
+        if label not in counts_by_label:
+            raise KeyError(f"{selection_summary_path} has no selection counts for {label}")
+        survival = np.zeros(n_temperatures + 1, dtype=float)
+        raw_rows = counts_by_label[label]
+        totals = []
+        finals = []
+        for k_text, row in raw_rows.items():
+            k = int(k_text)
+            if k > n_temperatures:
+                continue
+            total = int(row.get("total", 0))
+            final = int(row.get("final_catalog", 0))
+            if total > 0:
+                survival[k] = final / total
+                if k >= n_good:
+                    totals.append(total)
+                    finals.append(final)
+        fallback = (sum(finals) / sum(totals)) if totals else 1.0
+        for k in range(n_good, n_temperatures + 1):
+            if str(k) not in raw_rows or int(raw_rows[str(k)].get("total", 0)) == 0:
+                survival[k] = fallback
+        survival[:n_good] = 0.0
+        survival_by_n_good[int(n_good)] = np.clip(survival, 0.0, 1.0)
+        metadata[label] = {
+            "fallback_survival_fraction_for_empty_bins": float(fallback),
+            "raw_counts_by_good_temperature": raw_rows,
+            "survival_by_good_temperature": {
+                str(k): float(v) for k, v in enumerate(survival)
+            },
+        }
+    return CatalogSelectionModel(
+        analysis_flavor=flavor.name,
+        selection_summary_path=selection_summary_path,
+        survival_by_n_good=survival_by_n_good,
+        metadata=metadata,
+    )
+
+
 def validate_known_traps(
     stage08: Stage08Grid,
     prior: AmplitudePrior,
     known_trap_csv: Path = DEFAULT_STAGE01_CSV,
     chunk_size: int = 256,
+    selection_model: CatalogSelectionModel | None = None,
 ) -> tuple[dict, dict]:
     known = load_known_traps(known_trap_csv)
     probabilities, diagnostics = compute_probabilities_for_points(
@@ -670,9 +788,12 @@ def validate_known_traps(
         prior,
         n_good_values=(4, 3),
         chunk_size=chunk_size,
+        selection_model=selection_model,
     )
     p4 = probabilities[4]
     p3 = probabilities[3]
+    p4_intensity = diagnostics["intensity_probabilities"][4]
+    p3_intensity = diagnostics["intensity_probabilities"][3]
     low_mask = p4 < 0.5
     very_low_mask = p4 < 0.2
     summary = {
@@ -680,6 +801,8 @@ def validate_known_traps(
         "trap_count": int(p4.size),
         "n_good_4_probability": _probability_summary(p4),
         "n_good_3_probability": _probability_summary(p3),
+        "n_good_4_intensity_probability": _probability_summary(p4_intensity),
+        "n_good_3_intensity_probability": _probability_summary(p3_intensity),
         "fraction_p4_ge_0p5": float(np.mean(p4 >= 0.5)),
         "fraction_p4_ge_0p8": float(np.mean(p4 >= 0.8)),
         "fraction_p4_ge_0p9": float(np.mean(p4 >= 0.9)),
@@ -709,6 +832,8 @@ def validate_known_traps(
         **known,
         "p_characterized_n_good_4": p4,
         "p_characterized_n_good_3": p3,
+        "p_intensity_n_good_4": p4_intensity,
+        "p_intensity_n_good_3": p3_intensity,
         "tau_oob_fraction": diagnostics["tau_oob_count"] / stage08.temperatures_K.size,
     }
     return summary, validation_arrays
@@ -758,6 +883,7 @@ def write_hdf5(
     diagnostics: dict,
     validation_arrays_by_label: dict[str, dict],
     metadata: dict,
+    selection_model: CatalogSelectionModel | None = None,
 ) -> None:
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -780,6 +906,8 @@ def write_hdf5(
         results_group = handle.create_group("results")
         for n_good, probability_map in probability_maps.items():
             results_group.create_dataset(f"p_characterized_n_good_{n_good}", data=probability_map)
+        for n_good, probability_map in diagnostics.get("intensity_probability_maps", {}).items():
+            results_group.create_dataset(f"p_intensity_n_good_{n_good}", data=probability_map)
 
         diag_group = handle.create_group("diagnostics")
         diag_group.create_dataset("tau_oob_fraction", data=diagnostics["tau_oob_fraction_map"])
@@ -790,6 +918,12 @@ def write_hdf5(
         )
         diag_group.create_dataset("amplitude_below_count_by_temperature", data=diagnostics["amplitude_below_count_by_temperature"])
         diag_group.create_dataset("amplitude_above_count_by_temperature", data=diagnostics["amplitude_above_count_by_temperature"])
+        if selection_model is not None:
+            selection_group = diag_group.create_group("catalog_selection")
+            for n_good, survival in selection_model.survival_by_n_good.items():
+                selection_group.create_dataset(f"survival_by_good_count_n_good_{n_good}", data=survival)
+            selection_group.attrs["selection_summary_path"] = str(selection_model.selection_summary_path)
+            selection_group.attrs["analysis_flavor"] = selection_model.analysis_flavor
 
         validation_group = handle.create_group("validation_known_traps")
         for label, validation_arrays in validation_arrays_by_label.items():
@@ -853,19 +987,26 @@ def build_stage09_metadata(
     output_h5: Path,
     output_summary: Path,
     smoke_summary: dict | None,
+    analysis_flavor: str = "legacy",
+    selection_model: CatalogSelectionModel | None = None,
+    known_trap_csv_ngood4: Path = DEFAULT_STAGE01_CSV,
+    known_trap_csv_ngood3: Path = DEFAULT_STAGE01_NGOOD3_CSV,
 ) -> dict:
+    flavor = get_analysis_flavor(analysis_flavor)
     return {
         "producing_stage": "09_characterization_probability",
         "produced_at": _now_iso(),
+        "analysis_flavor": flavor.name,
         "code_path": str(Path(__file__).resolve()),
         "inputs": {
             "stage08_h5": str(stage08.h5_path),
             "stage08_summary": str(stage08.summary_path),
             "stage05_npz": str(prior.npz_path),
             "stage05_summary": str(prior.summary_path),
-            "stage01_ngood4_known_traps_csv": str(DEFAULT_STAGE01_CSV),
-            "stage01_ngood3_known_traps_csv": str(DEFAULT_STAGE01_NGOOD3_CSV),
-            "dipole_py": str(REPO_ROOT / "dipole.py"),
+            "stage01_ngood4_known_traps_csv": str(known_trap_csv_ngood4),
+            "stage01_ngood3_known_traps_csv": str(known_trap_csv_ngood3),
+            "stage01_selection_summary": None if selection_model is None else str(selection_model.selection_summary_path),
+            "dipole_py": str(REPO_ROOT / f"{flavor.dipole_module}.py"),
         },
         "outputs": {
             "hdf5": str(output_h5),
@@ -906,6 +1047,13 @@ def build_stage09_metadata(
         "n_good_values": list(n_good_values),
         "primary_n_good": 4,
         "sensitivity_n_good": 3 if 3 in n_good_values else None,
+        "probability_semantics": {
+            "p_characterized": "legacy n_good intensity probability"
+            if selection_model is None
+            else "full catalog probability: n_good intensity detection times empirical downstream orientation/SRH survival by good-temperature count",
+            "p_intensity": "diagnostic probability for the per-temperature GoodIntensityFit n_good criterion before downstream catalog survival",
+        },
+        "catalog_selection_model": None if selection_model is None else selection_model.metadata,
         "interpolation_policy": policy.__dict__,
         "out_of_grid_policy": {
             "tau": "Values below or above the Stage 08 tau grid are assigned p_det=0 for that temperature.",
@@ -926,6 +1074,10 @@ def run_smoke(
     production_tau_count: int = 161,
     production_energy_count: int = 121,
     chunk_size: int = 256,
+    analysis_flavor: str = "legacy",
+    selection_model: CatalogSelectionModel | None = None,
+    known_trap_csv_ngood4: Path = DEFAULT_STAGE01_CSV,
+    known_trap_csv_ngood3: Path = DEFAULT_STAGE01_NGOOD3_CSV,
 ) -> dict:
     tau_grid = np.geomspace(1e-3, 1e5, 10)
     energy_grid = np.linspace(0.08, 0.62, 9)
@@ -942,9 +1094,22 @@ def run_smoke(
         prior,
         n_good_values=(4, 3),
         chunk_size=chunk_size,
+        selection_model=selection_model,
     )
-    validation_summary_ngood4, _ = validate_known_traps(stage08, prior, DEFAULT_STAGE01_CSV, chunk_size=chunk_size)
-    validation_summary_ngood3, _ = validate_known_traps(stage08, prior, DEFAULT_STAGE01_NGOOD3_CSV, chunk_size=chunk_size)
+    validation_summary_ngood4, _ = validate_known_traps(
+        stage08,
+        prior,
+        known_trap_csv_ngood4,
+        chunk_size=chunk_size,
+        selection_model=selection_model,
+    )
+    validation_summary_ngood3, _ = validate_known_traps(
+        stage08,
+        prior,
+        known_trap_csv_ngood3,
+        chunk_size=chunk_size,
+        selection_model=selection_model,
+    )
     runtime = time.perf_counter() - start
     production_points = int(production_tau_count * production_energy_count)
     smoke_points = int(tau_grid.size * energy_grid.size)
@@ -952,6 +1117,7 @@ def run_smoke(
     summary = {
         "producing_stage": "09_characterization_probability_smoke",
         "produced_at": _now_iso(),
+        "analysis_flavor": get_analysis_flavor(analysis_flavor).name,
         "grid_shape": [int(tau_grid.size), int(energy_grid.size)],
         "grid_point_count": smoke_points,
         "interpolation_out_of_range": diagnostics["summary"],
@@ -1010,9 +1176,20 @@ def run_production(
     chunk_size: int = 256,
     make_plot_files: bool = True,
     figure_prefix: str = "09",
+    analysis_flavor: str = "legacy",
+    selection_summary_path: Path | None = None,
+    known_trap_csv_ngood4: Path = DEFAULT_STAGE01_CSV,
+    known_trap_csv_ngood3: Path = DEFAULT_STAGE01_NGOOD3_CSV,
 ) -> dict:
+    flavor = get_analysis_flavor(analysis_flavor)
     stage08 = load_stage08_grid(stage08_h5, stage08_summary)
     prior = load_amplitude_prior(stage05_npz, stage05_summary, variant="default")
+    selection_model = load_catalog_selection_model(
+        flavor.name,
+        (4, 3),
+        int(stage08.temperatures_K.size),
+        selection_summary_path=selection_summary_path,
+    )
     tau_grid = default_tau_135_grid(tau_count, tau_min_seconds, tau_max_seconds)
     energy_grid = default_energy_grid(energy_count)
     policy = InterpolationPolicy()
@@ -1036,18 +1213,21 @@ def run_production(
         prior,
         n_good_values=(4, 3),
         chunk_size=chunk_size,
+        selection_model=selection_model,
     )
     validation_summary_ngood4, validation_arrays_ngood4 = validate_known_traps(
         stage08,
         prior,
-        DEFAULT_STAGE01_CSV,
+        known_trap_csv_ngood4,
         chunk_size=chunk_size,
+        selection_model=selection_model,
     )
     validation_summary_ngood3, validation_arrays_ngood3 = validate_known_traps(
         stage08,
         prior,
-        DEFAULT_STAGE01_NGOOD3_CSV,
+        known_trap_csv_ngood3,
         chunk_size=chunk_size,
+        selection_model=selection_model,
     )
     unbounded_summary = summarize_unbounded_regime(
         tau_grid,
@@ -1071,11 +1251,21 @@ def run_production(
         output_h5,
         output_summary,
         smoke_summary,
+        analysis_flavor=flavor.name,
+        selection_model=selection_model,
+        known_trap_csv_ngood4=known_trap_csv_ngood4,
+        known_trap_csv_ngood3=known_trap_csv_ngood3,
     )
     summary = {
         **metadata,
         "probability_summary_n_good_4": _probability_summary(probability_maps[4]),
         "probability_summary_n_good_3": _probability_summary(probability_maps[3]),
+        "intensity_probability_summary_n_good_4": _probability_summary(
+            diagnostics["intensity_probability_maps"][4]
+        ),
+        "intensity_probability_summary_n_good_3": _probability_summary(
+            diagnostics["intensity_probability_maps"][3]
+        ),
         "interpolation_out_of_range": diagnostics["summary"],
         "known_trap_validation": {
             "n_good_4_csv": validation_summary_ngood4,
@@ -1098,6 +1288,7 @@ def run_production(
             "n_good_3_csv": validation_arrays_ngood3,
         },
         summary,
+        selection_model=selection_model,
     )
     if make_plot_files:
         summary["figures"] = make_figures(output_h5, figure_prefix=figure_prefix)
@@ -1131,6 +1322,7 @@ def run_production(
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--smoke", action="store_true", help="Run the small pre-production smoke grid only.")
+    parser.add_argument("--analysis-flavor", choices=["legacy", "minimal_caldet", "minimal"], default="legacy")
     parser.add_argument("--stage08-h5", type=Path, default=DEFAULT_STAGE08_H5, help="Stage 08 p_det HDF5 artifact.")
     parser.add_argument(
         "--stage08-summary",
@@ -1159,6 +1351,14 @@ def parse_args() -> argparse.Namespace:
         help="Smoke-check summary JSON path.",
     )
     parser.add_argument(
+        "--selection-summary",
+        type=Path,
+        default=None,
+        help="Fast Stage 01 selection summary JSON. Required implicitly for minimal_caldet.",
+    )
+    parser.add_argument("--ngood4-csv", type=Path, default=DEFAULT_STAGE01_CSV)
+    parser.add_argument("--ngood3-csv", type=Path, default=DEFAULT_STAGE01_NGOOD3_CSV)
+    parser.add_argument(
         "--figure-prefix",
         default="09",
         help="Prefix for optional figure filenames under cache/figures.",
@@ -1173,7 +1373,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--tau-max",
         type=float,
-        default=1e8,
+        default=1e9,
         help="Maximum production tau_135 grid value in seconds.",
     )
     parser.add_argument("--energy-count", type=int, default=121, help="Production E grid count.")
@@ -1184,9 +1384,38 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
-    stage08 = load_stage08_grid(args.stage08_h5, args.stage08_summary)
-    prior = load_amplitude_prior(args.stage05_npz, args.stage05_summary, variant="default")
+    flavor = get_analysis_flavor(args.analysis_flavor)
+    if flavor.name != "legacy":
+        if args.stage08_h5 == DEFAULT_STAGE08_H5:
+            args.stage08_h5 = flavor.stage08_h5
+        if args.stage08_summary == DEFAULT_STAGE08_SUMMARY:
+            args.stage08_summary = flavor.stage08_summary
+        if args.output_h5 == DEFAULT_OUTPUT_H5:
+            args.output_h5 = flavor.stage09_h5
+        if args.output_summary == DEFAULT_OUTPUT_SUMMARY:
+            args.output_summary = flavor.stage09_summary
+        if args.smoke_summary == DEFAULT_SMOKE_SUMMARY:
+            args.smoke_summary = flavor.stage09_smoke_summary
+        if args.ngood4_csv == DEFAULT_STAGE01_CSV:
+            args.ngood4_csv = flavor.records4_csv
+        if args.ngood3_csv == DEFAULT_STAGE01_NGOOD3_CSV:
+            args.ngood3_csv = flavor.records3_csv
+        if args.stage05_npz == DEFAULT_STAGE05_NPZ:
+            args.stage05_npz = flavor.stage05_npz
+        if args.stage05_summary == DEFAULT_STAGE05_SUMMARY:
+            args.stage05_summary = flavor.stage05_summary
+        if args.figure_prefix == "09":
+            args.figure_prefix = flavor.figure_prefix09
+
     if args.smoke:
+        stage08 = load_stage08_grid(args.stage08_h5, args.stage08_summary)
+        prior = load_amplitude_prior(args.stage05_npz, args.stage05_summary, variant="default")
+        selection_model = load_catalog_selection_model(
+            flavor.name,
+            (4, 3),
+            int(stage08.temperatures_K.size),
+            selection_summary_path=args.selection_summary,
+        )
         run_smoke(
             stage08,
             prior,
@@ -1194,6 +1423,10 @@ def main() -> None:
             production_tau_count=args.tau_count,
             production_energy_count=args.energy_count,
             chunk_size=args.chunk_size,
+            analysis_flavor=flavor.name,
+            selection_model=selection_model,
+            known_trap_csv_ngood4=args.ngood4_csv,
+            known_trap_csv_ngood3=args.ngood3_csv,
         )
         return
     run_production(
@@ -1211,6 +1444,10 @@ def main() -> None:
         chunk_size=args.chunk_size,
         make_plot_files=not args.no_figures,
         figure_prefix=args.figure_prefix,
+        analysis_flavor=flavor.name,
+        selection_summary_path=args.selection_summary,
+        known_trap_csv_ngood4=args.ngood4_csv,
+        known_trap_csv_ngood3=args.ngood3_csv,
     )
 
 

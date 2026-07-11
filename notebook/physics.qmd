@@ -1,0 +1,748 @@
+---
+title: "Simulation physics: emission, capture, recapture, and the deviation budget"
+---
+
+
+> **In plain terms.** This file is the *simulation* half of the project — the fake dark-matter
+> exposures we run to see how much traps shift the single-electron count. The hardest thing to get
+> right was *how a trap grabs charge as it is clocked past during readout*. We tried three models; the
+> first two were wrong. The current one, `phase_limited_v1v3`, says a trap can only grab charge during
+> a brief 20-microsecond window as the charge crosses it. §4 is the most important and most up-to-date
+> part: a careful accounting (checked three times, including by directly instrumenting the code) showing
+> that the trap effect surviving the normal data-cleaning is a *tiny leftover* (~0.3% per trap) of much
+> larger grab-and-release flows that mostly cancel out. **If short on time:** §1 and §3 are stable
+> background, §2 is the model history (only Model C is live), §4 is where things stand. New words are in
+> the [glossary](glossary.qmd).
+
+**Thread status:** current model = `phase_limited_v1v3` (readout capture in a ~20 µs transfer
+window, full-dwell emission, no full-row recapture). This file folds in the full history of how
+the trap-interaction model reached that point, because two earlier models are still referenced in
+the code comments and in older notes.
+
+**Reading order.** New readers should start with **[How the simulation code works](#how-the-simulation-code-works)**
+(immediately below) for the code map — the two entry points, the `CCD` object, and what a single
+trial actually does — then read the physics. §1 (emission physics) and §3 (packet volume / σ) are
+stable and were never overturned. §2 is the model's history — read it as a narrative of three
+successive models, only the last of which is live. §4 is the current deviation accounting (the
+newest and most reliable statement). §5–§7 are operating-condition decisions and a deferred
+improvement.
+
+Sources consolidated here (now in `attic/`): `TRAP_SIMULATION_PHYSICS.md` (2026-06-11),
+`RECAPTURE_PUMPING_HANDOFF.md` (2026-06-19), `DEVIATION_BUDGET.md` (2026-06-24),
+`HIGH_ENERGY_EVENT_SAMPLING_NOTE.md` (2026-06-12).
+
+---
+
+## How the simulation code works
+
+The physics below (§§1–7) is *what* the simulation implements. This section is *how the code is
+organized and how to run it* — the map a new reader needs before the physics. Two files carry it:
+`ccd_simulation.py` (the `CCD` object + the physics kernels) and `run_ccd_simulation.py` (the
+headless driver). `run_campaign.py` sweeps parameter axes over that driver.
+
+### The two entry points
+
+| entry point | what it does | output |
+|---|---|---|
+| `run_ccd_simulation.py` | one condition, one parameter set: fans `--num_runs` trials across a process pool | `ccd_traps_run<r>.h5` per trial in `--out` |
+| `run_campaign.py` | sweeps V_p → population → condition → clear-mode → exposure-order; each combo is a labelled dir, resumable (skips completed) | one output dir per scenario (48 by default) |
+
+A single-condition run:
+
+```bash
+python run_ccd_simulation.py --num_runs 200 --runconditions minos --out minos_conditions/
+```
+
+`run_ccd_simulation.py` does five things before any physics (lines ~92–203):
+
+1. **Recovers CCD timing** by reading one reference SNOLAB 135 K FITS from `snolab_image/` — purely
+   for its `HIERARCH DELAY_*` header keys, which set the per-pixel readout dwell `tpix` (horizontal)
+   and `tpix_vertical`. **Missing that file is fatal**, even for MINOS runs. `--binning` divides these
+   dwells (it models faster readout, *not* a smaller image).
+2. **Loads the τ sampling histogram** (`--tauhistfile`, default `tau_at_135k_hist.npz`): `hist` +
+   `bin_edges`. This is what the trap field is drawn from (produced upstream by the analysis — see the
+   data-flow appendix).
+3. **Loads the measured (τ135, σ) pairs** (`--pairsfile`, default `trap_tau135_sigma_pairs.npz`) for
+   the SRH capture model.
+4. **Sets the baseline trap count** as the histogram integral, `n_baseline_traps = round(Σ hist) ≈
+   3798` — the *characterized* count, not the raw detected count (detection is a poor false-positive
+   filter; see [completeness_efficiency](completeness_efficiency.qmd)). `--trap-density-scale` /
+   `--populations upper` inflate this for the upper-limit scenarios.
+5. **Fans out** `run_single_trial` over a `ProcessPoolExecutor` (default `cpu_count//2` workers —
+   each holds a full `CCD`, ~2.3 GB, so half the cores keeps RAM safe). Shared constants (τ arrays,
+   pairs) are passed with `itertools.repeat` so they are not re-copied per task.
+
+The physics knobs are all CLI flags, each mapped to a `CCD` constructor argument:
+`--packet-volume-um3` (V_p, default 3), `--phase-capture-ticks` (the 20 µs capture window in 15 MHz
+ticks), `--clear-mode`, `--exposure-order`, `--exp-indep-charge-mode`, `--binning-0h-factor`,
+`--zero-exp-dep-rate` (trap-only test). Each is persisted to the output HDF5 attrs and guarded (see
+below).
+
+### What one trial does (`run_single_trial`, line ~2047)
+
+Each worker runs this for one run index `r`:
+
+1. **Re-seed Numba's PRNG** from `os.getpid() + r*10000`. *Do not remove this* — without it every
+   worker forks the same RNG state and produces an identical trap field.
+2. **Idempotency guard.** If `ccd_traps_run{r}.h5` already exists, its stored attrs (`clear_mode`,
+   `exposure_order`, `trap_transport_model`, `phase_capture_ticks`, `binning`,
+   `exp_indep_charge_mode`) are checked against the current config; a match → skip (resumable), a
+   mismatch → hard error (never silently mix configs in one directory).
+3. **Build one `CCD(...)`** with the sampled trap field.
+4. **Build the exposure schedule** — 100 cycles of `[0, 4, 6, 10, 20]` h = 500 images, permuted by a
+   per-trial `default_rng(r)` (`shuffled`, default) so each image's trap background is decoupled from
+   its predecessor; `ordered` reproduces the old fixed `0→4→6→10→20` cycle (which biased the 0 h trap
+   excess high). `binned_0h` instead runs `[4, 6, 10, 20]×100` with a fast binned 0 h image after each
+   (800 images, no hardware clear).
+5. **Run it:** `for exposure in full_sequence: CCD.take_fake_image(exposure)`.
+6. **`CCD.process_run()`** — reduce to single-e counts + masking, write the HDF5.
+
+### The `CCD` object (line ~927)
+
+One instance owns one quadrant and everything about it:
+
+- **Geometry:** `nrow_quad = 512`, `ncol_quad = 3072` (row = vertical = readout direction).
+- **The sparse trap field:** `trap_indices` (row/col of each trap), `trap_taus` (per-trap τ, sampled
+  log-uniformly *within* a histogram bin), per-trap σ (resampled from the measured (τ, σ) pairs
+  nearest in log τ — preserves the empirical τ–σ correlation), and `trapped_charge_1d` (occupancy).
+- **`ccd_state`:** the free surface-charge accumulator that persists across images (traps and the
+  reservoir carry over; that is what makes exposure order matter).
+- **Timing/config:** `tpix_horizontal`, `tpix_vertical`, `runconditions`, `clear_mode`,
+  `phase_capture_ticks`, packet volume, binning.
+- **Result accumulators:** `single_e_counts[_no_traps][_masked]`, `unmasked_pixels[_no_traps]`,
+  bitmasks — the trap and **paired no-trap** branches (common random numbers; the deviation between
+  them is the whole deliverable, §4).
+
+### The methods where the physics lives
+
+`take_fake_image(hours)` orchestrates one image, in order:
+
+1. `simulate_clear()` — the per-image reset (mode-dependent; **retains trap occupancy** — §5).
+2. `charge_trap_interaction(ccd_state, dt = hours·3600)` — the **static exposure** phase of Model C:
+   occupied traps emit into their own pixel with `1 − e^{−dt/τ}`; empty measured traps do **not**
+   capture (charge is parked under V2 during integration).
+3. inject dark current (`∝ t`) + spurious charge (const) + high-energy clusters (`transplant_clusters`;
+   SNOLAB at `exp/10`).
+4. `simulate_readout()` → `fast_readout_numba` — the **readout** phase of Model C: column-by-column
+   vertical clocking, and per row transit an occupied trap emits with `1 − e^{−τ_pix/τ}` while an
+   empty trap with `q ≥ 1` captures with `1 − e^{−q·α}`, `α = σ·v_th·t_phase / V_p`.
+
+`process_run()` (line ~1431) runs after all images: it classifies clusters down to single-electron
+counts and applies `findBadCells` masking (the verbatim SENSEI hot-column / halo / bleed logic, §5)
+to produce the `single_e_counts_masked*` and unmasked-pixel arrays that the deviation budget and all
+downstream plotting consume.
+
+
+High-energy events are injected before the trap/no-trap branch split is read out, so both branches
+see the same transplanted cluster realization. The implementation is deliberately empirical:
+`take_fake_image` reads the fixed 20 h MINOS source image
+`minos_image/proc_corr_proc_skp_72000secs_exp_run10_NSAMP_300_36.fits`, takes quadrant 0,
+electronizes it, transposes it into `(row, col)`, and passes it to `transplant_clusters` with
+`count_threshold=100`, `max_aspect_ratio=3`, and `radius=60`. MINOS passes the requested exposure in
+seconds; SNOLAB passes `exposure/10`, so it has the same event morphology distribution but a 10x
+lower normalization.
+
+`transplant_clusters` labels connected components in `source_image > 0`, shuffles the labels, and
+takes `round(exposure/72000 * N_components)` candidates (scaled by `scale_factor`, currently 1).
+This is deterministic in the mean, not a Poisson draw; for the production 0-20 h schedule it ranges
+from no candidates at 0 h to the full source-image label set at 20 h. Each candidate is then filtered:
+total cluster charge must exceed the threshold, bounding-box aspect ratio must be <=3, long sparse
+horizontal streaks (`max_streak > 30` and fill factor <0.5) are rejected as serial-register-like, and
+the expanded local block must contain a pixel above 100 e. The retained cutout is not a 60-pixel
+radius around the whole total-charge-selected component. Instead, after the component passes the
+total-charge filter, the code builds a core mask from the same component's pixels whose individual
+charge is above 100 e, keeps all source charge within `radius=60` pixels of that high-charge core,
+and zeros pixels belonging to other labeled clusters.
+The resulting chunk is placed at a random active-area location, with up to 100 tries to avoid overlap
+with already transplanted chunks. Single-electron dark current and spurious events are then added
+with no exclusion mask, so they can land on or near the transplanted high-energy events just as random
+image charge would. Because the exposure scaling is applied before these filters and placement
+attempts, the final inserted-cluster count can be lower than the rounded target.
+
+```{python}
+#| label: fig-simulation-fake-image
+#| fig-cap: "A small fake exposure for visual orientation. The image is synthetic rather than a campaign output, but it uses the same charge vocabulary as `take_fake_image`: isolated single-electron pixels plus saturated high-energy clusters. The display uses an asinh stretch so 1e dots remain visible without losing the bright tracks."
+import sys, os
+sys.path.insert(0, os.path.abspath("figures"))
+import make_figures
+
+make_figures.simulation_fake_image(save=False)
+```
+
+```{python}
+#| label: fig-simulation-source-image
+#| fig-cap: "The real MINOS image used as the source for high-energy-event cluster transplants in `CCD.take_fake_image`: `minos_image/proc_corr_proc_skp_72000secs_exp_run10_NSAMP_300_36.fits`, quadrant 0, electronized with the same helper call used by the simulation before `transplant_clusters`. This is a reference/source image, not a fake exposure output."
+import sys, os
+sys.path.insert(0, os.path.abspath("figures"))
+import make_figures
+
+make_figures.simulation_source_image(save=False)
+```
+
+```{python}
+#| label: fig-simulation-condition-grid
+#| fig-cap: "Four fake-image examples in the same display style, arranged by condition and exposure. These are deterministic visual-orientation panels rather than campaign outputs: isolated 1e pixels are drawn at the UR per-pixel rates quoted in the simulation section, while high-energy events are deterministic examples whose abundance follows the simulation convention that SNOLAB has 10x fewer high-energy events than MINOS. The display stretch makes rare 1e pixels visible next to saturated high-energy tracks."
+import sys, os
+sys.path.insert(0, os.path.abspath("figures"))
+import make_figures
+
+make_figures.simulation_condition_grid(save=False)
+```
+
+
+The heavy per-row-transit SRH kernels are Numba-JIT free functions: `fast_readout_numba` (readout),
+`fast_clear_numba` (clear transport), `drain_traps_empty_numba` (the analytic `three_hour` drain),
+seeded via `seed_numba`. They are what §2's model math is actually evaluated by, per row, per column.
+
+
+```{python}
+#| label: fig-simulation-trap-effect
+#| fig-cap: "Selected-trap proof of concept using the live `fast_readout_numba` phase-limited kernel on a zoomed synthetic frame. This is not the standard trap distribution: a bright high-energy event clocks through a hand-placed patch of traps with tau_e of a few row dwells, filling them from the high-energy packet; those traps then emit delayed single-electron charge, visible as a trail above the event in the with-traps panel. The charge values remain physical; the grayscale display uses a boosted asinh stretch so 1e trail pixels are visible next to the saturated high-energy core."
+import sys, os
+sys.path.insert(0, os.path.abspath("figures"))
+import make_figures
+
+make_figures.simulation_trap_effect(save=False)
+```
+
+
+### Where to change what
+
+- **A physics knob** (V_p, capture window, clear mode, …) → a CLI flag on `run_ccd_simulation.py`,
+  threaded through `run_single_trial` into the `CCD` constructor. Add the same guard/attr if it must
+  not be mixed within one output directory.
+- **The capture/emission math** → `charge_trap_interaction` (integration) and `fast_readout_numba`
+  (readout). Read §2 first.
+- **The reset behaviour** → `simulate_clear` + the `*_numba` transport kernels (§5 clear modes).
+- **The masking** → `findBadCells` and the `hotcol.py`-equivalent helpers (§5).
+- **The sweep** → `run_campaign.py` (axes documented in `CLAUDE.md`).
+
+---
+
+## 1. Emission-time physics (verified against literature — never overturned)
+
+**What this section is:** the formula linking a trap's depth (E) and size (σ) to how long it holds
+charge (τ) at a given temperature. It is standard textbook physics, we checked it matches the
+literature, and it never changed. It's used two ways: to fit E and σ from a trap's measured
+τ-vs-temperature points, and to extrapolate τ to the 135 K operating temperature.
+
+The per-trap emission time follows Shockley–Read–Hall detailed balance, as used throughout the
+CCD trap-pumping literature (Hall 1952; Hall et al. IEEE TNS 61, 1826 (2014); Wood et al.; Oscura
+arXiv:2406.18502; Brusco arXiv:2510.23336):
+
+```
+tau_e(T) = exp(E_t / kT) / (sigma * v_th * N_v)
+v_th = sqrt(3 kT / m_cond)               (thermal velocity, holes)
+N_v  = 2 (2 pi m_dens kT / h^2)^(3/2)    (valence-band effective DOS)
+```
+
+*In words:* holding time τ rises steeply (exponentially) with trap depth E and falls as the sensor
+warms (larger kT), while a bigger cross-section σ shortens it. `v_th` and `N_v` are bundled
+temperature-dependent constants (see [glossary](glossary.qmd)); everything not explicitly modeled is
+absorbed into the fitted effective E and σ.
+
+SENSEI CCDs are **p-channel; carriers are holes.** Effective masses for 100–200 K (Green 1990, as
+adopted by arXiv:2406.18502): `m_cond = 0.41 m_e`, `m_dens = 0.94 m_e`. Note
+`tau_e ∝ T^-2 exp(E/kT)` — the standard DLTS form. The degeneracy/entropy factor is taken as 1 and
+temperature-independent σ is assumed; both are conventional and absorbed into the fitted effective
+(E, σ).
+
+The pumping dipole-intensity model
+`I = N_pumps · D_t · P_c · (exp(-t_ph/tau) - exp(-8 t_ph/tau))` matches the Oscura derivation; the
+emission window is `[t_ph, 8 t_ph]` for this clocking scheme (the factor 8 is the pump duty ratio,
+`delay_Tph_long = 7 × delay_Tph`).
+
+### Constants bug (fixed 2026-06-11 in `dipole.log_energy_cross_section`)
+
+The original implementation had three constant errors:
+
+| quantity | was | should be | effect on fitted value |
+|---|---|---|---|
+| k_B | 8.6717333262e-5 (typo) | 8.617333262e-5 eV/K | fitted E biased +0.63% |
+| h | 4.1135e-15 (typo) | 4.135667696e-15 eV·s | h³ off by −1.6% |
+| mass prefactor | bare m_e | m_dens^{3/2}/m_cond^{1/2} = 1.4233 m_e | fitted σ biased ×1.42 |
+
+**τ_e(135 K) predictions are exactly invariant under these fixes.** The fit family
+`log tau = const − log sigma − 2 log(kT) + E/kT` is unchanged, so the constant errors were
+absorbed entirely into the fitted (E, σ). Verified bit-for-bit: rehistogramming the refit τ135
+values reproduces `tau_at_135k_hist.npz` with zero bins changed. Net effect of the fix: quoted
+σ → ×0.722, quoted E → ×0.9937, all τ-based inputs unchanged. All `tau_at_<T>k_hist.npz` files
+therefore remained valid.
+
+---
+
+## 2. The readout trap-interaction model — three successive versions
+
+The simulation clocks charge row-by-row through each trap. How a trap captures and releases charge
+during that transit went through **three models**. Only the third is live. This section explains
+each and why the transition happened, because the failure of each motivated the next.
+
+### 2.1 Model A — pure emission, no recapture (original; WRONG)
+
+Original `fast_readout_numba`: captured deterministically (P_c = 1 whenever a packet with ≥1
+carrier passed an empty trap) and released with `P = 1 − exp(−t_dwell/tau_e)` per row transfer, the
+released carrier rejoining the packet above the trap **and never being recaptured.**
+
+Why it was wrong: instant capture taken seriously implies an emitted carrier sitting over the same
+trap is immediately recaptured. With the fitted cross-sections (median σ ≈ 7.5e-17 cm²), the
+capture time of a single carrier over its trap is ~ms–s, far shorter than the ~49 s row dwell.
+Consequences:
+
+- 97% of traps had `tau_e` < one row dwell (median `tau_e(135 K) ≈ 4.4 s` vs 49.1 s dwell) and
+  re-emitted into their own packet within the capture dwell → **completely inert.**
+- The entire simulated trap effect came from the ~2–3% long-τ tail.
+
+### 2.2 Model B — full-row two-state SRH with recapture (2026-06-11; superseded)
+
+*Idea:* fix Model A by letting an emitted carrier be **recaptured** by the same trap. A trap is
+either empty or occupied and flips between the two at an emission rate (`lambda_e`, how fast it lets
+go) and a capture rate (`lambda_c`, how fast it grabs). Over each small time-step we use the exact
+probability of ending up in each state.
+
+For each trap, at each row-transfer dwell Δt, with `q` carriers in the packet above:
+
+```
+lambda_e = 1 / tau_e                          (emission rate)
+lambda_c = q_band * k_c,  k_c = sigma * v_th / V_p   (capture rate per carrier over the trap)
+```
+
+`q_band = q` for an empty trap and `q + 1` for an occupied one (the emitted carrier joins the packet
+and can be recaptured). End-of-dwell state drawn from the **exact two-state Markov transition
+probabilities**:
+
+```
+P(release | occupied) = [lambda_e / (lambda_e + lambda_c)] * (1 − exp(−(lambda_e+lambda_c) Δt))
+P(capture | empty)    = [lambda_c / (lambda_e + lambda_c)] * (1 − exp(−(lambda_e+lambda_c) Δt))
+```
+
+Same expressions with (Δt = exposure time, q = charge in the trap's own pixel) drive
+`charge_trap_interaction` for the static exposure phase. Limits: `k_c → 0` recovers Model A;
+`k_c → ∞` gives a sticky trap that drags carriers indefinitely. Detailed-balance check: equilibrium
+occupancy ratio = `n / (N_v e^{−E/kT})`, the standard SRH result.
+
+In the strong-recapture regime the per-shift escape probability reduces to
+`p_esc ≈ lambda_e/lambda_c = N_v V_p e^{−E/kT} / q_band` — **independent of σ** — so a captured
+carrier is dragged multiple pixels or held across images rather than re-emitted in place. Model B
+made ~97.5% of trapped charge retained through a readout (traps as near-permanent sinks; mean
+shifts-to-escape `≈ k_c·τ ≈ 10⁴`).
+
+**Validation tests that passed for Model B** (reproduce with small grids + `seed_numba`): exact
+charge conservation; correct CTI geometry (deferred charge lands in trailing rows); `k_c = 0`
+reproduces the geometric law `P(k) = p(1−p)^k`; capture/escape frequencies match the analytic
+two-state formulas; padded-buffer bookkeeping independently verified.
+
+### 2.3 Why Model B was abandoned — the pumping-consistency tension
+
+Model B assumed capture happens over the **full ~49 s row dwell**. The pocket-pumping data
+contradict that:
+
+- Pumping uses a **flat field** (~2000 e/pixel, roughly constant image-to-image), so there is
+  *always* charge over the trap — `n` is never 0 and recapture is never geometrically excluded.
+- Pumping therefore runs at high density (`n ≈ 2000/V_packet`), ~2000× stronger recapture than
+  readout single-e (`n ≈ 1/V_packet`). With Model B's `k_c`, recapture during pumping would be
+  ~10⁶× faster than the dwell → the dipole would be suppressed to ~1e-4 e (invisible). **Yet
+  dipoles of hundreds–thousands of e are observed.** Taken at face value, Model B's σ-based
+  recapture rate is orders of magnitude too strong to be consistent with the dipoles existing.
+
+The investigation (`RECAPTURE_PUMPING_HANDOFF.md`) also confirmed, before the fix, that:
+- The magnitude ratio between the minimal and legacy catalogs (~2×) is driven by **trap count**
+  (9333 vs 5171 detected), not the 5× σ difference, because capture **saturates**:
+  `k_c·tpix_vertical ≈ 8×10⁴ ≫ 1` → capture prob ≈ 1 for ~97% of traps (σ_sat ≈ 5e-20 cm²).
+- σ is 99.7% E-degenerate in the Arrhenius fit (`logσ = 37.3·E + const` at fixed τ135) and ~5×
+  below literature (~1e-15). Under Model B this σ offset did not propagate because capture
+  saturated. (See [dipole_algorithm](dipole_algorithm.qmd) for the σ/E fit.)
+
+### 2.4 Model C — `phase_limited_v1v3` (current, live)
+
+Resolution: **pumping probes V1/V3 traps; readout parks charge under V2.** Capture during readout
+is not a full-row-dwell process — it happens only in the brief inter-pixel transfer window when the
+packet actually crosses the trap's phase. The model was switched accordingly (audited and signed
+off; see memory `recapture-pumping-test-open`):
+
+> **Phase geometry from the sequencers (p-channel polarity) — reconciled and documented
+> 2026-07-06.** The sequencer XML state bits list which clock lines are at their *high* rail — and
+> SENSEI CCDs are p-channel, so the **holes collect under the most negative, i.e. non-asserted,
+> gate**. Reading `daq/temp_scan_run1_imgseq.xml` with hole polarity: every readout rest state
+> asserts V1|V3 with V2 low → **holes rest under V2**, with V1/V3 as the barriers — exactly the
+> premise above. The pump cycle asserts `{1,3}[t_ph] → {1,2}[7t_ph] → {1,3}[t_ph] → {2,3}[7t_ph]`,
+> so the hole well steps **V2[t_ph] → V3[7t_ph] → V2[t_ph] → V1[7t_ph]**: a V1 or V3 trap loads
+> during its long park and its countable emission window is [t_ph, 8t_ph] — the canonical peaked
+> `e^{−t/τ} − e^{−8t/τ}` the data follow, always in one direction — while a V2 trap is loaded in
+> the short parks and emits a non-peaked `1 − e^{−7t_ph/τ}` response into *alternating* sides,
+> which cancels → **pumping-blind**. So pumped/measured traps = V1/V3 and the readout rest gate =
+> V2, self-consistently. This also resolves the flagged anomaly of the 2026-06-12
+> phase-population audit: it read the state bits with electron polarity (wells under the
+> *asserted* gates), which swaps every label — that is why the class it identified as "measured"
+> came out with the non-peaked shape real dipoles do not show. One corrected implication: the
+> unprobed V2 population is **rest-well resident** during readout (not barrier-resident) — those
+> traps see resting charge at full dwell, fill early, and thereafter sit occupied (emission faces
+> immediate recapture), i.e. near-inert as saturated sinks; this is the mechanism behind rejecting
+> the blanket ×1.5 phase-blindness inflation (results-page ledger). Residual verification: the
+> clock rail voltages live in the DAQ-side `voltage_skp_lta_v2_C_minos.sh` (not in this repo);
+> "asserted = high rail = hole barrier" is the standard LTA convention and is independently
+> confirmed by the pump-shape argument above.
+
+- **Capture** happens in a `t_phase = 20 µs` transfer window: empty trap with `q ≥ 1` captures with
+  `1 − e^{−q·α}`, `α = σ v_th t_phase / V`. Because the window is short and fixed, capture no longer
+  saturates for single electrons and is **binning-invariant** (α does not scale with readout speed).
+- **Emission** still runs over the full per-row dwell: occupied trap emits with `1 − e^{−τ_pix/τ}`.
+- **No full-row recapture.** An emitted carrier is not re-captured over the whole dwell.
+- **σ matters again.** Single-e capture probability `∝ σ` (unsaturated), inverting the Model-B
+  conclusion that σ was irrelevant. See memory `sigma-degeneracy-and-literature`.
+- **V1/V3 phase split (added 2026-07-02, code-review F1/F8).** Pumping cannot tell V1 from V3, but
+  transport can: a **V3** trap is crossed by the packet on row *exit*, after collecting the dwell's
+  emission, so its own emitted carrier faces a same-step recapture roll `1−e^{−q·α}` — and in the
+  3 h drain its escape is thinned to rate `e^{−α}/τ`. A **V1** trap is crossed on row *entry*:
+  capture is checked on the arriving packet *before* the emission roll, and an emitted carrier
+  exits over V3 without recrossing the trap — it always escapes. Traps are assigned
+  Bernoulli(`v3_phase_fraction`, default ½, HDF5 attr); `1.0` reproduces the pre-split all-V3
+  kernel. **Measured A/B (2026-07-02, 50 trials/arm, trap-only upper population, sequencer):** the
+  fix *redistributes* the masked excess from slope to intercept — masked intercept **+45%**
+  (z = +12), masked slope **−3.2%** (z = −3.0); raw-count slope −19%, intercept +28%; occupancy
+  60.6% → 59.8%. Both review passes had guessed the slope was biased *low*; the measurement shows
+  the opposite: freed V1 readout emission is prompt (per-image → intercept), and removing the
+  futile cycle removes a delay line that had been converting prompt emission into
+  exposure-correlated release (→ slope). Old-kernel slope quotes were conservative; the intercept
+  was substantially understated. Campaigns rerun at 0.5 (see `ab_test_v3phase/`,
+  `analyze_ab_v3phase_test.py`).
+
+Consequence for the science: **all campaign numbers computed under Model B were superseded** and
+regenerated under Model C. The `campaign/` results and the deviation budget below are Model C.
+
+---
+
+## 3. Packet volume V_p and why poorly-known σ is not a separate problem
+
+`V_p` is the effective volume a **single carrier** explores in a pixel well (local density a trap
+sees is `q / V_p`). It is forced on the model by capture (which needs a density) and is not
+constrained by the pumping measurement.
+
+Single-carrier is the right regime to target, not an arbitrary simplification: with the fitted
+median trap cross-section (σ ≈ 7.5e-17 cm²), emission/recapture at q=1–2 — the readout kinetics
+that actually generate the modeled SER excess — is deeply unsaturated (α ~ 0.6–1%), so `V_p` has
+real leverage there. Capture during high-energy-event passage (q ≳ few hundred) is close to
+saturated for most of the trap population well before typical cluster sizes, so `V_p`'s exact
+value has little leverage on trap filling. A packet-multiplicity-dependent `V_p(q)` was considered
+and deliberately not built; the single-carrier limit is used throughout.
+
+`V_p` is modeled as a box: two hard-wall lateral extents (`w_x`, `w_y`) times a thermal
+(Boltzmann) vertical spread (`sigma_z`), `V_p = w_x * w_y * sigma_z`. This is a mixed
+effective-volume convention, not a uniform physical model — a rigorous treatment would derive
+the local carrier density at the trap consistently in all three directions rather than geometric
+support in two and a Boltzmann spread in the third — adopted here as a pragmatic systematic
+estimate. Sourced determinants, single-carrier limit:
+
+- **Lateral, cross-column (`w_x`):** width of the active channel between the parallel
+  channel stops, `pixel pitch (15 µm) − channel-stop width (3 µm) = 12 µm`. Pixel pitch and
+  channel-stop width are both stated directly for the SENSEI C-module active region in
+  Wu, Desai, et al. 2026 (arXiv:2605.30281, §II/V). This is an **upper limit** on the
+  single-carrier extent, not a directly measured packet width — no source gives the
+  lateral doping profile inside that 12 µm gap, so a lone carrier could in principle sit
+  in a narrower region of it.
+- **Lateral, along-column (`w_y`):** width of one clock phase, `pixel pitch / 3 = 5 µm`,
+  assuming three phases of equal width (Holland et al. 2003 describe a generic
+  "conventional three-phase" gate structure; the LBNL 4k×2k/4k×4k CCD Users Manual states
+  the three phases have identical voltage swings, consistent with but not proof of equal
+  physical width — no source gives the mask widths directly). Treated as a hard box: SENSEI's
+  operating clock swing is 2.25 V, both vertical and horizontal (Wu et al. 2026), and
+  kT = 11.6 meV at 135 K, so the barrier the swing produces is at most ~194 kT tall — an
+  upper-bound argument (capacitive coupling through the gate oxide/nitride stack reduces the
+  fraction of the swing the carrier actually sees), but almost certainly still many kT.
+- **Vertical (`sigma_z`):** thermal spread of a carrier in the buried-channel potential well.
+  Holland et al. 2003 (Appendix A, Eq. A5) solve the channel potential as a quadratic well,
+  `V(y) = V_min + (q N_A / 2 eps_Si) (y - y_min)^2`; treating this as a harmonic potential
+  energy for a hole and applying the equipartition theorem gives
+  `sigma_z = sqrt(eps_Si kT / (q² N_A))`. `N_A` comes from Holland's channel implant dose
+  (1.3e12 cm⁻², reported for a same-process PMOSFET test structure and corroborated
+  independently by 1.27e12 cm⁻² required to match a process-simulated CCD cross-section)
+  divided by the buried-channel depth Wu et al. 2026 report for this device
+  (≈1 µm beneath the SiO2 interface) — `N_A ≈ 1.3e16 cm⁻³` — giving `sigma_z ≈ 24 nm`.
+
+Electrostatic estimate: `V_p ≈ 12 µm × 5 µm × 0.024 µm ≈ 1.4 µm³`. This sits below the
+current baseline but inside the existing **V_p ≈ 1–10 µm³** systematic band (code default
+`--packet-volume-um3` = 3 µm³); still quote that band as the systematic, since `w_x` above
+is an upper limit and the real active-region mask geometry is not independently confirmed.
+
+Under Model B (saturated), the **masked** trap excess varied only ~±25% over V_p = 0.3–30 µm³.
+Under Model C (unsaturated single-e capture), V_p enters through `α ∝ 1/V`, a mild effect on the
+upper population and negligible on baseline (see the deviation budget table, axis `vp1 vs vp3`).
+
+Why global σ error is absorbed: everywhere σ appears only as `σ/V_p` (verified: σ ×10 ≡ V_p ÷10
+exactly), so any global σ bias folds into the V_p systematic band; per-trap random σ errors average
+over ~1300 traps/quadrant, and the empirical (τ, σ) pair resampling
+(`trap_tau135_sigma_pairs.npz`, from `make_trap_pairs.py`) carries the measured scatter in. τ_e —
+the non-degenerate directly measured quantity — is what the histogram supplies.
+
+---
+
+## 4. Deviation budget under `phase_limited_v1v3` (current, 2026-06-24)
+
+Goal: for a trap-branch image at exposure `t` (hours), account for **every** deviation of the
+measured single-electron density from injected truth. Reviewed adversarially by Codex over three
+rounds; §4.4 records what survived and what was overturned by direct instrumentation.
+
+### 4.1 Setup
+
+Per quad: `N_pix = 512 × 3072 = 1.573e6`. Injected truth (recovered by the no-trap branch to
+<0.3% intercept, <1.3% slope across all 53 complete scenarios):
+
+```
+d_true(t) = d_EI + d_ED · t,   d_EI = 9.94e-5 e/pix/img,  d_ED = 4.36e-5/24 e/pix/hr.
+```
+
+Both branches share the **same injected realization** (common random numbers), so the deviation is
+purely trap-induced:
+
+```
+Δ(t) = C_trap/U_trap − C_notrap/U_notrap ≈ ΔC/U + C_nt·(1/U_trap − 1/U_notrap)   (numerator + denominator)
+```
+
+C = single-e counts, U = unmasked-pixel count. Measured split (minos/upper, 20 h): 87% numerator,
+13% denominator.
+
+Per-image pipeline (`take_fake_image`, `ccd_simulation.py`): (1) `simulate_clear()` retains trap
+occupancy, emitted charge during clear is zeroed/lost; (2) `charge_trap_interaction(dt=t·3600)` —
+integration emission `1−e^{−t/τ}`, empty traps do NOT capture (charge under V2); (3) inject dark
+(`∝t`) + spurious (const) + clusters (snolab = t/10); (4) `simulate_readout()` — per row-step,
+occupied→emit `1−e^{−τ_pix/τ}`, empty & q≥1 → capture `1−e^{−q·α}`, `α = σ v_th t_phase / V`,
+`t_phase = 20 µs`.
+
+Timing (computed from the reference FITS header): `τ_pix = 49.10 s`, `T_read = 512·τ_pix = 6.98 h`
+(bin1) or 13.1 min (bin32, which divides τ_pix only). The per-row dwell is the serial read of the
+full 3200-column register — 3072 active columns plus overscan, all clocked before the next vertical
+shift — so `NCOL = 3200` (what the code reads from the header) is the correct multiplier. *(An
+earlier version of this note quoted 47.13 s / 6.70 h / 12.6 min, computed with the active-area width
+3072; that was ~4% low. Corrected 2026-07-02.)* Clear (sequencer) = 3.26 s.
+
+### 4.2 The deviation terms
+
+| term | mechanism | sign | t-dependence | key property |
+|---|---|---|---|---|
+| **A+C** reservoir emission | occupied traps emit during integration (A) or readout (C); both counted | + | rises, saturating | DOMINANT; slope driver + most of +intercept; `∝ N_occ` |
+| **B** readout capture of spurious | empty traps capture injected spurious 1e during readout; deferred | − | ~const (intercept) | pre_readout only; `∝ n_empty` |
+| **D** readout smearing / multi-e splitting | empty trap captures from a cluster pixel, re-emits downstream → extra 1e | + | grows with t | mostly masked (lands near clusters); **sign asserted, magnitude not instrumented** (§4.3) |
+| **E** readout capture of dark current | empty traps sink dark 1e | − | ∝ t | negligible (bounded by dark budget) |
+| **F** masking-denominator coupling | trap-deferred charge → more hot-column/bleed flags → U_trap < U_notrap | + | — | analysis term; 13% of minos/upper density excess; report upper in COUNTS not density |
+| **G** clear-mode modulation of N_occ | clear sets the reservoir entering each image | ± | — | three_hour drains drainable τ; scales A+C and B |
+| **H** 2e-channel coupling | capture 2e→1e (+1e count), emission 1e→2e | ± | — | Δ2e measured positive & growing → net charge piling |
+
+Mapping to the two fitted channels:
+```
+Δ_EI (intercept) = ⟨s⟩·Σ_i o_i(1−e^{−T_read/τ_i})  −  N_spur·p̄_cap   (+ small D,E,F)
+Δ_ED (slope)     = ⟨s⟩·Σ_i o_i (1/τ_i) e^{−(t+T_read)/τ_i}  +  dΔD/dt  −  dΔE/dt
+```
+`o_i` = occupancy at integration start; `⟨s⟩` = survival (not recaptured/masked/merged) ≤ 1.
+
+Per-scenario sign/magnitude predictions:
+
+| axis | effect | predicted result |
+|---|---|---|
+| baseline vs upper | N_occ: 8 vs ~11k | baseline NULL both channels; upper LARGE |
+| minos vs snolab | D,F ∝ clusters (10×); A,B,E common | counts: similar (A floor); density: minos inflated by F |
+| pre vs post | B only in pre | post intercept less negative |
+| clearseq vs clear3h | G drains N_occ | clear3h → smaller A+C, larger B → deficit, flat (drainable τ only) |
+| bin1 vs bin32 | T_read 6.7h→12.6min | 20 h Δ ~unchanged; 0 h Δ more negative |
+| vp1 vs vp3 | α ∝ 1/V | weak; baseline negligible, upper mild |
+
+### 4.3 Instrumented closure — the measured kernel response
+
+The clean closed form `P_emit_counted(τ;t) = 1 − e^{−(t+T_read)/τ}` (originally called (★)) was
+**overturned by direct instrumentation** (`_instrument_run.py`, origin-tagged carriers,
+minos/upper/clearseq/pre, equilibrated occ 62% = 12.4k of 20k traps). Fate funnel per image, 20 h:
+
+| quantity | bin1 | bin32 | binning |
+|---|---|---|---|
+| readout emissions E_read | 19121 | 10268 | scales ~1.9× |
+| self-recaptured (same step) | 17366 (91%) | 8686 (85%) | scales |
+| escaped (E_read−selfrec) | 1754 | 1582 | ~invariant |
+| integration emission E_int | 254 | 294 | invariant (small!) |
+| injected-1e SINK | 2022 | 1851 | ~invariant |
+| net Δ1e unmasked | 402 | 834 | not invariant |
+| **net Δ1e halo+bleed-masked** | **61** | **68** | **INVARIANT** |
+
+What the measurement established (three budget claims overturned):
+1. **"Integration emission A dominates the slope" is WRONG.** `E_int ≈ 254/img` — the occupied
+   reservoir is very-long-τ, so `P_emit(t) ≈ 0`. The bulk of the net count is escaped readout
+   emission.
+2. **Readout emission is ~91% futile** (immediate self-recapture; capture saturates for the
+   occupied large-σ traps). Emission flux ≠ effect.
+3. **The masked observable is CAPTURE-LIMITED, not emission-limited.** `E_read` is binning-dependent
+   (19k→10k) but the masked net Δ1e is invariant (61→68), as are sink and net-count. Capture rate
+   `α = σ·v_th·t_phase/V` is fixed by the 20 µs phase window → binning-invariant. The effect is
+   driven by **capture of exposure-accumulated image charge during readout** (∝ exposure → slope;
+   α-fixed → binning-invariant) plus its redistribution; the huge emission flux is mostly
+   self-recapture cycling that cancels.
+4. **Survival ⟨s⟩ ≈ 61/19121 ≈ 0.3%** (masked), ≈2% unmasked. The net is a tiny residual of two
+   ~2000-electron opposing flows. The naive `P_emit_counted ≈ 1` overpredicts per-trap net by ~200×.
+
+Codex's final tempering (do not overstate): the flow counters are **not** the observable (they
+precede cluster classification + halo/bleed masking, which is a nonlinear count of isolated 1e
+clusters); the missing positive term is **cluster→1e redistribution** (D); origin-tagging is biased
+in mixed packets so "91% self-recapture" is qualitative ("mostly futile"), not literal; long-τ
+equilibration is not demonstrated (300 images ≈ 200 days, τ≥1e7 s cannot equilibrate).
+
+**Defensible headline:** under minos/upper/clearseq/pre, the halo+bleed-masked trap excess is a
+small residual after large readout capture/emission/recapture flows, ~invariant bin1↔bin32; gross
+readout emission is mostly cancelled by immediate recapture; integration emission is small in this
+run state; the unmasked deviation is binning-dependent; the positive count term is cluster→1e
+redistribution; capture-limited is plausible but not proven by these counters.
+
+### 4.4 τ-band of the slope (three_hour/upper, seed-capping)
+
+Capping the minimal_caldet upper-limit seed at successive `τ_max` and re-running (MINOS, three_hour,
+30 trials/cap) empirically sums `Σ o_i(…)`:
+
+| seed τ_max | N_traps | slope (exp-dep) | intercept (exp-indep) |
+|---|---:|---:|---:|
+| 1e5 | 4179 | 1.842e-6 (≈ no-trap truth 1.82e-6) | 9.91e-5 |
+| 1e6 | 5529 | 2.110e-6 | 1.006e-4 |
+| 5e7 (prod cap) | 17475 | 2.816e-6 | 9.96e-5 |
+| 3e8 (unbounded) | 66087 | 2.827e-6 | 9.74e-5 |
+| **baseline (characterized)** | **3798** | **1.818e-6 (= truth)** | **9.93e-5 (= truth)** |
+
+Findings (these correct the earlier "hours-to-day" tag):
+1. **The slope band is τ > 1e5 s (days-to-months), NOT "hours-to-day."** τ<1e5 traps add ~zero
+   exposure-dependent excess. The slope excess (+1.0e-6 over truth) lives at τ>1e5, dominated by
+   τ∈[1e6, 5e7] (+0.71e-6) then τ∈[3e5, 1e6] (+0.26e-6).
+2. **For the UPPER population, three_hour does NOT flatten A+C.** The 3 h drain survival
+   `e^{−3h/τ} ≈ 1` for τ≫3h, so the long-τ reservoir survives the clear occupied and produces a
+   LARGE positive slope (2.82e-6, +55% over truth). The "flatten-on-3h" prediction is a **baseline
+   (short-τ) result; it inverts for upper.**
+3. **The slope converges in τ_max** (production cap 5e7 sits past the turnover; extending to
+   unbounded 3e8 leaves the slope unchanged). Per-trap contribution collapses ~300× across the
+   turnover — a trap that never emits within the run defers no charge — so even the 48612 monster
+   1/ε-inflated traps at τ>5e7 add <1%.
+4. **The baseline is NULL; the UL slope is 1/ε-inflation headroom, not a measured effect.** The real
+   characterized population (3798 traps) gives slope = truth (excess ≈0). The 2.8e-6 UL slope is the
+   90% CL efficiency-corrected *allowance* for hidden long-τ traps (τ~3e5–1e7, ε~0.01–0.07), where
+   ~40 measured traps are amplified ~300× by 1/ε. **Do NOT floor it** — the ~21 characterized
+   (decoy-rejected) traps at τ>1e6 are real evidence the region is populated; an ε-floor would
+   assert the null by fiat. The deliverable is **two numbers**: measured/characterized = NULL, and
+   efficiency-corrected 90% CL UL ≈ 2.8e-6 (slope) with a ~±22% Poisson statistical error on the
+   trap-driven excess (√20/20 on the ~20 anchoring detections; the excess is the ~+1.0e-6 above the
+   ~1.8e-6 no-trap truth, so ~±8% on the total) — quoted **conditional on the Stage-05 amplitude
+   prior** (hidden traps
+   assumed as bright as detected ones; fainter-by-2/4 stress variants inflate 1/ε in the driver band
+   ×1.4–2.8 / ×2.7–9.3 — a stated conditionality, not a folded band; see
+   [completeness](completeness_efficiency.qmd) §8 and the results-page ledger, TODO 5.2 disposition
+   2026-07-06). The only principled exclusion is zero-detection bins where 2.3/ε is pure
+   Poisson-floor amplification (e.g. the empty τ=2.7e-5 cold bin). See memory
+   `exposure-dependent-slope-is-low-eps-tail`.
+
+*(Seed-file note, 2026-07-02: the upper / point-estimate seed NPZs were regenerated with the
+×1/0.972 energy-fit-survival haircut — integrals 17,978 / 14,717 vs the 17,475 used by the table
+above. The in-progress `v3_phase_fraction = 0.5` rerun uses the regenerated seeds, so the refreshed
+table will carry the new counts.)*
+
+---
+
+## 5. Operating-condition decisions (confirmed by Ansh, 2026-06-11)
+
+- **SNOLAB = 10× fewer high-energy events** than MINOS (code `exp/10`; the paper's "factor of 2"
+  was corrected).
+- **Rates are per pixel:** exposure-independent 9.94e-5 e/pix/image, exposure-dependent
+  4.36e-5 e/pix/day (UR quadrant, SENSEI:2024yyt). Old "superpix" comments were wrong.
+- **Inter-image dead time ≈ 0.** The default `sequencer` clear follows
+  `temp_scan_run1_clearseq.xml`: 1500 fast + 10 slow vertical shifts, retaining trap occupancy;
+  free surface charge at the clear boundary is discarded. The former no-interaction behavior remains
+  as `--clear-mode instantaneous`. Clear modes and exposure orders are documented in `CLAUDE.md`.
+
+### Masking fidelity vs the real SENSEI pipeline (`hotcol.py`, 2026-06-11)
+
+Goal: reproduce SENSEI's masking as faithfully as possible, not optimize it. **Verified
+verbatim-equivalent:** windowSum/expandWindow; calculatePvals incl. `sf(hits−0.5)`; pCut=0.5 with
+p×nCells scaling; window sizes 1–5; addNeighbors; iteration to stability; hot-pixel→column merge;
+halo (60 pix around >100e) and bleed (full column above >100e). **Deliberate exclusions:**
+very-hot pre-cuts and the 16-chunk cut (target real detector defects the sim lacks). **Kept-as-is
+differences:** the sim uses a flat rate model (real pipeline uses `max(uniform, linX/linY)`
+envelope) and feeds only 1e counts (real uses 1e + 2+e). Net effect: simulated masks are somewhat
+*stricter* than real, so the quoted masked excess errs low — acceptable and documented.
+
+---
+
+## 6. Known remaining simplifications (assessed minor)
+
+1. Charge resident in a trap's own pixel during exposure is never captured (interaction runs on the
+   cleared state before injection). Second-order.
+2. Exposure-independent charge injection point is `--exp-indep-charge-mode` (default `pre_readout`
+   traverses active-area traps; `post_readout` does not — preserves common-random-number
+   cancellation but makes spurious charge un-trappable). See `CLAUDE.md`.
+3. No serial-register traps.
+4. V_p is a single uniform-density number (absorbed by the V_p band).
+5. q changes by ±1 within a dwell are ignored in the two-state rates (fixed-q approximation).
+6. `charge_trap_simulation.ipynb` predates the current `CCD(...)` signature — update before use.
+7. Simulated images are noiseless integer charge — no read noise is added before the single-e
+   cluster threshold (justified for skipper CCDs' sub-electron read noise, but stated nowhere else).
+8. Dark current accrued *during readout* is not injected (at bin1 the top row waits
+   `T_read ≈ 7 h`). Both branches omit it identically so the trap−no-trap Δ largely cancels, but
+   the trap branch's transit charge is slightly understated and 0 h images are dark-free by
+   construction.
+8b. Traps initialize **empty** (`trapped_charge_1d = zeros`); the occupied reservoir builds from
+   scratch over the ~500-image run, whereas a real 135 K detector carries months of prior filling
+   history. The dominant τ ~ 10⁶ s band equilibrates within the run and the τ > 5×10⁷ s tail never
+   emits either way, so the §4.4 τ_max-convergence result covers most of the risk — but the
+   steady-state occupancy of the τ ~ 10⁷ s band is *trusted via that convergence argument*, not a
+   demonstrated equilibration (τ ≥ 10⁷ s cannot equilibrate in 500 images).
+9. **Code-review F1/F8 — phase-split kernel fix implemented and A/B-validated 2026-07-02** (see
+   §2.4 for the measured deltas): per-trap V1/V3 Bernoulli flag, capture-before-emission (free
+   escape) for V1, recapture-thinned 3 h drain for V3; `--v3-phase-fraction 1.0` reproduces the
+   old all-V3 kernel. The A/B showed a significant slope→intercept redistribution, so **all
+   pre-split campaign numbers are superseded — rerun in progress at 0.5.** The ½ phase fraction
+   itself remains an assumption, carried as a knob.
+
+---
+
+## 7. Deferred improvement — high-energy-event (HEE) sampling
+
+**Not implemented; kept as a forward TODO** (`HIGH_ENERGY_EVENT_SAMPLING_NOTE.md`). Independent of
+when the sampler is built, the *modeling limitations* of the current method are carried as a named
+line in the results-page systematics ledger (2026-07-06): trap occupancy — and hence the trap-effect
+scale — tracks the HEE rate, and the deterministic scaling suppresses event-count variance, so the
+run-to-run spread is optimistic. Current method:
+extract connected clusters from one fixed 20 h MINOS image, scale the candidate count
+deterministically with exposure, select candidates without replacement, apply the charge / shape /
+serial-streak filters above, transplant non-overlapping 60-pixel-context chunks to random active-area
+positions, and use that same image in the paired trap and no-trap branches. SNOLAB reuses the same
+cluster population at 10x lower rate. Adequate for a first estimate, but it suppresses event-count
+variance, caps the morphology library at one 20 h detector realization, rejects overlaps, and assumes
+MINOS/SNOLAB differ only in normalization.
+
+Proposed backward-compatible `hee_sampling_mode = "legacy" | "poisson_bootstrap"`:
+1. Build a cluster library from **all** approved reference images (store charge cutout, bbox, total
+   & peak charge, area, source image/exposure, condition).
+2. Separate HEE core from surrounding deferred/trap-tail pixels (store wide context for validation
+   only).
+3. Draw `N_HEE ~ Poisson(rate_condition · exposure · area)` independently per image.
+4. Sample clusters with replacement from the condition-matched library.
+5. Place at random valid active-area locations; permit physical overlap.
+6. Use the same injected realization for trap and no-trap branches (preserves common-random-number
+   cancellation).
+7. Separate MINOS/SNOLAB libraries when data allow; until then expose the 10× scaling and
+   shared-spectrum assumption as metadata/systematics.
+
+Validation before production use: linear mean-count scaling with exposure/area; `Var(N)/Mean(N) ≈ 1`
+unless overdispersion is significant; compare charge/peak/area/aspect/NN-distance distributions;
+compare halo/bleed/masked fractions vs held-out real images; confirm cutouts are not mutated;
+bit-for-bit identical injected HEE images in the paired branches; fixed-seed regression tests for
+both modes. Watch the masked single-electron excess (can respond nonlinearly to HEE fluctuations).
+
+---
+
+## Data flow and inputs (current)
+
+```
+proc/*.fits → run_charge_traps.py → fit_dipole_spectra_*_err_4.h5 (per-trap tau(T), E, sigma)
+                                  → tau_at_135k_hist.npz          (tau sampling histogram)
+                                  → trap_tau135_sigma_pairs.npz   (per-trap tau135/sigma/E pairs)
+charge_trap_figures.ipynb         → tau_at_135k_hist_upper_limit.npz (efficiency-corrected 90% CL)
+run_ccd_simulation.py / run_campaign.py → per-trial HDF5 in campaign/<scenario>/
+```
+
+Each simulated trap: τ sampled log-uniformly within a histogram bin; σ resampled from the ~20
+measured (τ135, σ) pairs nearest in log τ (preserves the empirical τ–σ correlation);
+`k_c = σ·v_th(135 K)/V_p`. `make_trap_pairs.py` refits (E, log σ) from the stored per-temperature τ
+values, so it is correct regardless of whether the HDF5 predates the constants fix. The simulation
+now seeds the **characterized** trap count (`n_baseline_traps = round(tau_weights.sum())` ≈ 3798),
+not the detected count — decoy control showed detection is a poor false-positive filter
+(random/horizontal decoys reach "well-behaved" at 22–47%) while characterization rejects ~97–99%.
+See [completeness_efficiency](completeness_efficiency.qmd) for the upper-limit population construction.

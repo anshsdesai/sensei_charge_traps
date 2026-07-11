@@ -1,0 +1,20 @@
+{
+  "finder_version": "signed-refit-finder-v1",
+  "metadata": {
+    "calibration_path": "signed_refit_finder_calibration.npz",
+    "calibration_sha256": "beb5983a12f7a2fb09b5e0ec3f6d2f453e18cae5e853878c33859c1e33f121fe",
+    "calibration_version": "signed-refit-finder-calibration-v2",
+    "electronize_scale_adu_per_e": 400.0,
+    "gain_status": "provisionally accepted by analysis owner on 2026-06-13",
+    "selection_did_not_use_candidate_count": true
+  },
+  "selected_config": {
+    "lobe_rule": "separate",
+    "max_relative_lobe_imbalance": 0.5,
+    "name": "robust_separate_2p5_balance_p2",
+    "noise_estimator": "robust",
+    "persistence": 2,
+    "require_trail_isolation": false,
+    "sigma_threshold": 2.5
+  }
+}

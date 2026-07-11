@@ -1,0 +1,273 @@
+---
+title: "5 · Results"
+---
+
+::: {.callout-note appearance="simple"}
+**In plain terms.** This page reports what the pipeline actually *found* — as opposed to
+*how* it works, which is threads 1–4. Three blocks: (1) the **measured trap catalog** (how deep
+the traps sit, how strongly they capture, how long they hold charge), (2) the **completeness bound**
+and the hidden-population it implies, and (3) the **simulation's bottom line** for the SENSEI
+single-electron dark-matter background.
+
+The headline is **two numbers**: the *measured/characterized* trap impact on the masked
+single-electron rate is **null**; the residual risk is an **efficiency-corrected 90% CL upper
+limit** on a hidden long-τ population, reported with an error band rather than floored.
+:::
+
+::: {.callout-important appearance="simple"}
+**Campaign numbers will be superseded.** The V1/V3 phase-split kernel fix (physics [§2.4](physics.qmd),
+[§6](physics.qmd)) supersedes the pre-split campaign numbers; the production rerun at
+`v3_phase_fraction = 0.5` is in progress. The **catalog** and **completeness** figures below are
+current. The **campaign** figures in §4 are the *current* (pre-split) simulation — shown to
+illustrate the shape of the result — and will be regenerated when the rerun lands (tracked in
+`NOTEBOOK_COMPLETION_TODO.md`, item 1). The A/B test redistributes excess from slope to intercept, so
+expect the §4 numbers to shift, not the qualitative null-vs-allowance story.
+:::
+
+All figures regenerate at render time from the real caches via
+[`figures/make_figures.py`](figures/make_figures.py); no simulation-seed file is written by a render.
+
+---
+
+## 1. The headline
+
+The headline is **two numbers**, both conditional on hidden traps sharing the *observed* E/σ
+distribution and — for the upper limit — the *observed* brightness distribution (the conditionality
+is spelled out in §6):
+
+- **Measured / characterized (the null).** The ~3,798 characterized traps (the real, decoy-rejected
+  population) perturb the masked single-electron rate by an amount consistent with **zero** — the
+  simulated masked excess for the baseline population equals the no-trap truth (physics
+  [§4.4](physics.qmd)).
+- **Efficiency-corrected 90% CL upper limit (the allowance).** Inflating the characterized
+  population by the per-bin completeness `1/ε` and taking the 90% CL gives an upper *allowance* for a
+  hidden long-τ population — an exposure-dependent masked-rate slope of order **2.8 × 10⁻⁶**
+  (pre-rerun value). Its statistical error is **~±22% on the trap-driven excess** (Poisson √20/20 on
+  the ~20 anchoring long-τ detections; the excess is the ~+1.0 × 10⁻⁶ above the ~1.8 × 10⁻⁶ no-trap
+  truth, so this is ~±8% on the quoted total — and a floor, since the 1/ε weighting makes the
+  effective count somewhat below 20). That is the only computed error — an earlier "~25% band incl.
+  completeness systematic" phrasing described a band that was never built (audit 2026-07-06). The allowance is additionally
+  **conditional on the amplitude prior**: ε assumes hidden traps share the *detected* traps'
+  brightness, and the Stage-05 prior is faint-end-truncated by selection. The cached stress variants
+  quantify the conditionality — if hidden traps were 2× (4×) fainter, `1/ε` in the UL driver band
+  τ ∈ [3×10⁵, 5×10⁷] s grows **×1.4–2.8** (**×2.7–9.3**) (completeness
+  [§8](completeness_efficiency.qmd)); this is stated as a condition on the headline, not folded into
+  an error band. The allowance is **not floored**: ~21 characterized, decoy-rejected traps at
+  τ > 10⁶ s are real evidence the region is populated, so an ε-floor would assert the null by fiat.
+
+The rest of the page is the evidence for each.
+
+---
+
+## 2. The measured trap catalog
+
+The production (minimal, calibrated-detection) catalog characterizes **~3,798 traps** across the four
+quadrants — those that pass the finder, have ≥4 good-temperature intensity fits, are
+orientation-consistent, and yield a good Arrhenius energy fit (the funnel in §2.4). Each carries a
+fitted depth `E`, capture cross-section `σ`, and per-temperature emission times `τ(T)`.
+
+### 2.1 Energies and cross-sections
+
+```{python}
+#| label: fig-results-energy-sigma
+#| fig-cap: "The measured catalog. **A** — fitted trap depth E (eV): most traps are shallow (~0.2–0.35 eV) with a tail to ~0.6 eV. **B** — capture cross-section σ (cm²), spanning many decades. **C** — the joint (σ, E) density, which lies along the SRH degeneracy ridge (small σ ↔ small E): σ is ~99.7% E-degenerate, so it is absorbed into the V_p systematic rather than quoted independently (see the σ-degeneracy note). Source: `fit_dipole_spectra_minimal_caldet_err_4.h5`."
+import sys, os
+sys.path.insert(0, os.path.abspath("figures"))
+import make_figures
+
+make_figures.results_energy_sigma(save=True)
+```
+
+### 2.2 Emission times at 135 K (and their correlation with depth)
+
+The single quantity the simulation seeds is the distribution of emission time `τ` at the 135 K
+anchor. Deep/slow traps are *extrapolated* there from the (higher) temperature where they were
+actually caught; only ~479 of the 3,798 have a direct 135 K fit.
+
+```{python}
+#| label: fig-results-tau135-energy
+#| fig-cap: "**Top** — τ(135 K) vs fitted energy: deeper traps hold charge longer, and the long-τ arm (τ > 1 hr) is measured at high temperature (in the dwell window) then extrapolated down, not measured at 135 K directly. **Bottom** — the τ135 census the CCD simulation samples (log-uniformly within each bin, Σ ≈ 3,798 traps), split into directly-measured (green) and extrapolated (blue), with 1 hr / 1 day / 1 year markers. The sparse long-τ tail past 1 hr is the risky, hard-to-measure population that drives the exposure-dependent upper limit. Production `figure_utils.plot_tau135_energy_scatter`."
+import sys, os
+sys.path.insert(0, os.path.abspath("figures"))
+import make_figures
+
+make_figures.results_tau135_energy(save=True)
+```
+
+### 2.3 How the catalog was selected
+
+```{python}
+#| label: fig-results-catalog-funnel
+#| fig-cap: "The selection funnel from the found dipoles to the characterized catalog: 9,333 found → ≥4 good-temperature fits → orientation-consistent → 3,798 characterized, with the loss at each cut. Panel B is the good-temperature count per dipole (the ≥4 gate). Same figure as thread 1; repeated here so the results page is self-contained. Source: `fit_dipole_spectra_minimal_caldet_err_4.h5`."
+import sys, os
+sys.path.insert(0, os.path.abspath("figures"))
+import make_figures
+
+make_figures.catalog_funnel(save=True)
+```
+
+---
+
+## 3. Completeness and the upper-limit population
+
+Is the catalog missing a dangerous hidden batch of long-lived traps? Method 3 (thread 3) gives a
+per-τ135 recoverable fraction `ε(τ135)`; dividing the census by it produces the
+population fed to the simulation. Two products: a point-estimate (efficiency-corrected) census and a
+90% CL upper-limit census.
+
+### 3.1 Completeness over the catalog
+
+```{python}
+#| label: fig-results-completeness-overlay
+#| fig-cap: "The completeness curve ε(τ135) over the characterized τ135 histogram. High completeness at short/moderate τ; the curve falls in the long-τ tail, which is where the correction (and its uncertainty) matters. Production `figure_utils.plot_completeness_overlay`."
+import sys, os
+sys.path.insert(0, os.path.abspath("figures"))
+import make_figures
+
+make_figures.completeness_overlay_fig(save=True)
+```
+
+### 3.2 Efficiency-corrected census (point estimate)
+
+```{python}
+#| label: fig-results-efficiency-hist
+#| fig-cap: "The efficiency-corrected τ135 population (census ÷ ε, no CL inflation) — the point-estimate 'true' population under the assumption that hidden traps share the observed E distribution. Correction band τ ∈ [6×10⁻⁵, 10⁹] s. Production `figure_utils.plot_efficiency_corrected_hist` (write=False; no seed written)."
+import sys, os
+sys.path.insert(0, os.path.abspath("figures"))
+import make_figures
+
+make_figures.completeness_efficiency_hist(save=True)
+```
+
+### 3.3 The 90% CL upper-limit population
+
+```{python}
+#| label: fig-results-upper-limit-hist
+#| fig-cap: "The efficiency-corrected 90% CL upper-limit τ135 population — the pessimistic 'what if there are many more' census that the `--populations upper` simulation samples. The current (2026-07-02, ×1/0.972 energy-fit-survival haircut) seed integrates to ~17,978 effective traps vs ~3,798 characterized; the pre-split §4 campaign was seeded with the earlier 17,475-integral file, and the in-progress rerun uses this regenerated one. Correction band τ ∈ [6×10⁻⁵, 5×10⁷] s. Production `figure_utils.plot_upper_limit_hist` (write=False; no seed written)."
+import sys, os
+sys.path.insert(0, os.path.abspath("figures"))
+import make_figures
+
+make_figures.completeness_upper_limit_hist(save=True)
+```
+
+---
+
+## 4. Simulation campaign results
+
+`run_campaign.py` runs the catalog and the upper-limit population through the CCD readout simulation
+across a scenario grid and reports the **masked single-electron rate** (trap vs no-trap, after the
+`hotcol.py`-faithful masking) as a linear fit in exposure time: an exposure-**independent** intercept
+(per-image / prompt) and an exposure-**dependent** slope (per-day / deferred). All figures below are
+the **current** campaign (minimal_caldet, central V_p = 3 µm³, shuffled order, `post_readout` spurious
+charge) — they will be **superseded** by the `v3_phase_fraction = 0.5` rerun but show the shape of the
+result. On `post_readout`: it adds the identical spurious-charge realization to both branches *after*
+readout, preserving a clean common-random-number cancellation — at the cost that spurious charge never
+traverses the traps, i.e. deviation-budget term B (readout capture of spurious 1e) is absent from
+these runs ([physics](physics.qmd) §4.2, §6.2; `pre_readout` is the single-run code default).
+
+### 4.1 Single scenarios: the null and the allowance
+
+Each panel plots the single-electron density vs exposure with traps (red) and without (blue) against
+the injected truth (dashed), plus the trap − no-trap difference.
+
+```{python}
+#| label: fig-results-scenario-null
+#| fig-cap: "**Baseline (characterized) population — the null.** MINOS, three_hour clear. With-traps tracks the no-trap truth across exposure; the exposure-dependent rate with traps (1.836×10⁻⁶) matches truth (1.817×10⁻⁶) and the difference panel is consistent with ~zero. The ~3,798 real characterized traps do not perturb the masked rate. Production `figure_utils.plot_simulation_results`."
+import sys, os
+sys.path.insert(0, os.path.abspath("figures"))
+import make_figures
+
+make_figures.results_scenario_null(save=True)
+```
+
+```{python}
+#| label: fig-results-scenario-upper
+#| fig-cap: "**Upper-limit population — the allowance.** MINOS, three_hour clear. The 1/ε-inflated long-τ population (~17,475 effective traps, this campaign's seed; the regenerated seed is 17,978) lifts the with-traps density above truth, giving a clear exposure-dependent excess (2.786×10⁻⁶ vs truth 1.817×10⁻⁶ — a ~53% slope excess). This is the 90% CL *allowance* for a hidden long-τ population, not a measured effect."
+import sys, os
+sys.path.insert(0, os.path.abspath("figures"))
+import make_figures
+
+make_figures.results_scenario_upper(save=True)
+```
+
+### 4.2 Scenario comparison (forest plots)
+
+```{python}
+#| label: fig-results-forest-headline
+#| fig-cap: "Baseline (null) vs upper-limit (allowance), MINOS and SNOLAB, three_hour clear. With-traps (red) vs no-trap (blue) against the injected truth (dashed), with the V_p systematic band. The **baseline** points sit on truth (the null); the **UL** points show the large exposure-dependent allowance — biggest for MINOS (more high-energy events → more occupancy). Production `figure_utils.compare_scenarios`."
+import sys, os
+sys.path.insert(0, os.path.abspath("figures"))
+import make_figures
+
+make_figures.results_forest_headline(save=True)
+```
+
+```{python}
+#| label: fig-results-forest-clearmodes
+#| fig-cap: "The **baseline null across all clear modes** (sequencer / three_hour / binned-0h / binned), MINOS and SNOLAB, zoomed. With-traps sits on the injected truth to within the V_p systematic in every clear mode — the null is robust to how the array is reset between exposures. (The wide pink bars are the V_p 1–10 µm³ band; binned has no band since only the central V_p was run.)"
+import sys, os
+sys.path.insert(0, os.path.abspath("figures"))
+import make_figures
+
+make_figures.results_forest_clearmodes(save=True)
+```
+
+### 4.3 Where the upper-limit slope lives (τ-band)
+
+Capping the upper-limit seed at successive τ_max and re-running isolates *which* traps carry the
+exposure-dependent excess (physics [§4.4](physics.qmd)). Pre-phase-split values, to be refreshed:
+
+| seed τ_max | N traps | slope (exp-dep) | intercept (exp-indep) |
+|---|---:|---:|---:|
+| 10⁵ | 4,179 | 1.84×10⁻⁶ (≈ no-trap truth) | 9.9×10⁻⁵ |
+| 10⁶ | 5,529 | 2.11×10⁻⁶ | 1.01×10⁻⁴ |
+| 5×10⁷ (prod cap) | 17,475 | 2.82×10⁻⁶ | 9.96×10⁻⁵ |
+| **baseline (characterized)** | **3,798** | **1.82×10⁻⁶ (= truth)** | **9.9×10⁻⁵ (= truth)** |
+
+: The slope band is τ > 10⁵ s (days–months), dominated by τ ∈ [10⁶, 5×10⁷]; it **converges** in
+τ_max (the production 5×10⁷ cap sits past the turnover). The baseline is the truth (null); the UL
+slope is the 1/ε-inflation headroom, not a measured effect. {tbl-colwidths="[24,16,30,30]"}
+
+---
+
+## 5. Systematics ledger
+
+One place for every knob and assumption behind the numbers above.
+
+| systematic | how carried | size / direction | status |
+|---|---|---|---|
+| **Packet volume V_p** | 1–10 µm³ band (baseline 3), campaign axis | mild on upper via α ∝ 1/V; negligible on baseline | quoted as a band |
+| **σ (cross-section)** | folds into V_p (σ/V_p degenerate) | absorbed; no separate term | closed |
+| **½ phase fraction** (`v3_phase_fraction`) | knob, bracket by running 0 / 0.5 / 1.0 | controls slope↔intercept split (A/B: intercept +45%, slope −3.2%) | not a big deal; bounded |
+| **Phase-blindness ×1.5** | *not applied* | would inflate UL, but V2 traps behave differently (charge is held there) — inflation is not physically correct | **rejected** |
+| **High-T Arrhenius lean** | bracket: hot points as-measured (A) vs un-leaned (B), live energy-fit refit ([signed_refit](signed_refit.qmd) §6b) | **≤7%** on the UL-slope driver band (30 → 28 traps), **0%** on the τ135 > 1 hr tail fraction — far below the V_p band. Mechanism identified by shape: thermally activated capture, E_b ≈ 0.16 eV; instrumental cause excluded | settled 2026-07-03; third-variant check (2026-07-06) **confirms production is the conservative end**: taking the activated mechanism as true moves hot-only τ135 *down* (median −0.21 dex), tail identical (1.47%) under A/B/C, driver band 30/28/26 |
+| **Amplitude prior / P_c(T)** | Method-3 Stage 05/10; faint-by-2/4 cached | **one-sided up**, and much larger in the UL driver band than at the plateau: mean completeness @10³ s drops 0.992 → 0.920 → 0.744, but at τ = 10⁵/10⁶/10⁷ s the faint-by-2 (faint-by-4) variants inflate `1/ε` by **×1.4–2.8** (**×2.7–9.3**); falling P_c(T) at high T is *real* incompleteness | **resolved by disposition (2026-07-06, TODO 5.2)**: the "~25% band" was audit-traced to a never-computed recommendation (Poisson 1/√20 alone); headline now quotes ±22% Poisson as the statistical error and carries the faint-prior axis as an **explicit conditionality** (hidden traps assumed as bright as detected ones), with the driver-band stress numbers stated, not folded |
+| **High-energy-event (HEE) model** | clusters from **one** 20 h MINOS image, deterministically scaled with exposure; SNOLAB = same library ÷10 ([physics](physics.qmd) §7) | trap occupancy — and hence the trap-effect **scale** — tracks the HEE rate, so this is plausibly the dominant scale uncertainty on the allowance; the suppressed event-count variance also makes the run-to-run spread (and any UL-slope significance) optimistic | named scale systematic; Poisson-bootstrap sampler itself stays a deferred implementation |
+| **Masking fidelity** | `hotcol.py`-faithful; sim masks slightly stricter than real | quoted masked excess errs **low** | documented |
+
+---
+
+## 6. What is — and isn't — claimed
+
+**Claimed.** Assuming hidden traps share the *observed* E/σ distribution **and the observed
+brightness (the Stage-05 amplitude prior)**: the measured/characterized trap impact on the masked
+single-electron rate is null, and the hidden long-τ population is bounded by the
+efficiency-corrected 90% CL upper limit above (statistical error ~±22% on the trap-driven excess
+over the no-trap truth slope, Poisson on the anchoring detections; ~±8% on the quoted total). The amplitude condition is load-bearing: the prior is selection-truncated at the faint
+end, and a hidden population 2× (4×) fainter than anything characterized would inflate the
+driver-band `1/ε` by ×1.4–2.8 (×2.7–9.3) — see §1 and completeness
+[§8](completeness_efficiency.qmd).
+
+**Not claimed / genuinely unbounded.**
+
+- A trap sitting outside the measurable band at *every* temperature is invisible and unbounded by any
+  of these methods (needs an independent handle: colder measurement, longer t_ph, or a
+  dark-current/leakage argument).
+- A population hiding at an E/σ the protocol rarely characterizes is not bounded.
+- The upper-limit slope is an *allowance*, not a detection; the baseline is null.
+
+**Open (this page).**
+
+- Campaign numbers (§4) pending the `v3_phase_fraction = 0.5` rerun.
+- Survivor-free P_c re-measurement (thread 3, §9) would fully de-bias the genuine-fading fraction.

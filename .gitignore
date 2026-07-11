@@ -16,9 +16,11 @@ paper/*.out
 *.npz
 *.h5
 figures/*
+figures_legacy/*
 *.png
+!notebook/figures/*.png
 *.csv
-!signed_refit_manifest.csv
+!attic/signed_refit_investigation/signed_refit_manifest.csv
 checks
 
 # F1 phase-split A/B test outputs (TEST DATA, see run_ab_v3phase_test.py)
@@ -29,3 +31,33 @@ trap_completeness_method3/cache/*
 !trap_completeness_method3/cache/.gitkeep
 trap_completeness_method3/notebooks/.ipynb_checkpoints/
 trap_completeness_method3/notebooks/**/*.ipynb_checkpoints/
+
+# run_campaign.py generated output tree (large, regenerable)
+campaign/
+
+# Reference-only material, not part of this pipeline
+Santiago Sim/
+
+# Personal editor config
+.vscode/
+
+# Claude working scripts (probes, one-off analyses)
+claude_scripts/
+
+# Local backups of superseded artifacts (never version)
+backups/
+
+# Quarto render products (regenerate with `quarto render notebook`)
+notebook/_site/
+notebook/_freeze/
+notebook/*.quarto_ipynb
+notebook/*.quarto_ipynb_*
+notebook/*.html
+notebook/code_review_2026-07-01_files/
+
+# Rendered exports of working notes
+NOTEBOOK_COMPLETION_TODO.html
+NOTEBOOK_COMPLETION_TODO_files/
+
+# Reference PDFs dropped at repo root (papers, manuals)
+/*.pdf

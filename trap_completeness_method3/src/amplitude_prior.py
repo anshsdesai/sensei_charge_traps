@@ -20,6 +20,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from dipole import log_energy_cross_section
+from trap_completeness_method3.src.analysis_flavors import AnalysisFlavor, get_analysis_flavor
 
 
 STAGE_ID = "05_amplitude_prior"
@@ -480,14 +481,15 @@ def _maybe_write_plots(
     return output_paths
 
 
-def build_summary(root: Path) -> dict[str, Any]:
+def build_summary(root: Path, flavor: AnalysisFlavor) -> dict[str, Any]:
     workspace = root / "trap_completeness_method3"
     cache_dir = workspace / "cache"
     cache_dir.mkdir(parents=True, exist_ok=True)
     produced_at = datetime.now().astimezone().isoformat(timespec="seconds")
     code_path = str((workspace / "src" / "amplitude_prior.py").resolve())
-    primary_path = root / "fit_dipole_spectra_err_4.h5"
-    sensitivity_path = root / "fit_dipole_spectra_err_3.h5"
+    # Flavor-specific characterized-trap catalogs (legacy=dipole.py, minimal_caldet=dipole_new).
+    primary_path = flavor.fit_hdf5_ngood4
+    sensitivity_path = flavor.fit_hdf5_ngood3
 
     primary_rows = _load_observations(primary_path, "n_good_4")
     sensitivity_rows = _load_observations(sensitivity_path, "n_good_3")
@@ -504,7 +506,7 @@ def build_summary(root: Path) -> dict[str, Any]:
     if not trap_rows:
         raise ValueError("No trap-level depth rows found.")
 
-    npz_path = cache_dir / "05_amplitude_prior_v1.npz"
+    npz_path = flavor.stage05_npz
     _write_npz(npz_path, high_conf_with_depth, trap_rows, temp_effects)
 
     figures = _maybe_write_plots(cache_dir / "figures", high_conf_with_depth, trap_rows, temp_effects)
@@ -518,6 +520,7 @@ def build_summary(root: Path) -> dict[str, Any]:
 
     summary = {
         "producing_stage": STAGE_ID,
+        "analysis_flavor": flavor.name,
         "produced_at": produced_at,
         "code_path": code_path,
         "inputs": [
@@ -529,7 +532,7 @@ def build_summary(root: Path) -> dict[str, Any]:
         ],
         "outputs": [
             str(npz_path.resolve()),
-            str((cache_dir / "05_amplitude_prior_summary.json").resolve()),
+            str(flavor.stage05_summary.resolve()),
             *figures,
         ],
         "selection": {
@@ -663,11 +666,18 @@ def main() -> None:
         default=Path(__file__).resolve().parents[2],
         help="Repository root.",
     )
+    parser.add_argument(
+        "--analysis-flavor",
+        choices=["legacy", "minimal_caldet", "minimal"],
+        default="legacy",
+        help="Which characterized-trap catalog to build the prior from (legacy or minimal_caldet).",
+    )
     args = parser.parse_args()
 
     root = args.root.resolve()
-    summary = build_summary(root)
-    summary_path = root / "trap_completeness_method3" / "cache" / "05_amplitude_prior_summary.json"
+    flavor = get_analysis_flavor(args.analysis_flavor)
+    summary = build_summary(root, flavor)
+    summary_path = flavor.stage05_summary
     with summary_path.open("w", encoding="utf-8") as handle:
         json.dump(_as_builtin(summary), handle, indent=2, sort_keys=True)
         handle.write("\n")

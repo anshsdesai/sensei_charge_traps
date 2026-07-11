@@ -31,6 +31,7 @@ try:
     from dipole import log_energy_cross_section
 except Exception:  # pragma: no cover - fallback is only for schema/debug runs.
     log_energy_cross_section = None
+from trap_completeness_method3.src.analysis_flavors import get_analysis_flavor
 
 
 def now_local_iso() -> str:
@@ -99,12 +100,29 @@ def tau_at_temperature(tau_135: np.ndarray, E_eV: np.ndarray, temperatures_K: np
 
 def load_stage09(path: Path) -> dict:
     with h5py.File(path, "r") as h5:
+        results = h5["results"]
+        p4 = results["p_characterized_n_good_4"][:]
+        p3 = results["p_characterized_n_good_3"][:]
+        p4_intensity = results["p_intensity_n_good_4"][:] if "p_intensity_n_good_4" in results else p4
+        p3_intensity = results["p_intensity_n_good_3"][:] if "p_intensity_n_good_3" in results else p3
+        survival4 = None
+        survival3 = None
+        if "catalog_selection" in h5["diagnostics"]:
+            selection = h5["diagnostics/catalog_selection"]
+            if "survival_by_good_count_n_good_4" in selection:
+                survival4 = selection["survival_by_good_count_n_good_4"][:]
+            if "survival_by_good_count_n_good_3" in selection:
+                survival3 = selection["survival_by_good_count_n_good_3"][:]
         return {
             "tau_grid": h5["grid/tau_135_seconds"][:],
             "E_grid": h5["grid/E_eV"][:],
             "temperatures": h5["grid/temperature_K"][:],
-            "p4": h5["results/p_characterized_n_good_4"][:],
-            "p3": h5["results/p_characterized_n_good_3"][:],
+            "p4": p4,
+            "p3": p3,
+            "p4_intensity": p4_intensity,
+            "p3_intensity": p3_intensity,
+            "survival4": survival4,
+            "survival3": survival3,
             "tau_oob_fraction": h5["diagnostics/tau_oob_fraction"][:],
             "all_temperatures_tau_oob": h5["diagnostics/all_temperatures_tau_oob"][:].astype(bool),
             "known_ngood4_p4": h5["validation_known_traps/n_good_4_csv/p_characterized_n_good_4"][:],
@@ -204,6 +222,47 @@ def poisson_tail_mean(
             for k in range(1, n_good):
                 dp[:, :, k] = old[:, :, k] * (1.0 - probs) + old[:, :, k - 1] * probs
         result[start:stop] = (1.0 - np.sum(dp, axis=2)).mean(axis=1)
+    return result
+
+
+def poisson_catalog_mean(
+    pdet_by_temp_point_amp: np.ndarray,
+    amplitude_grid: np.ndarray,
+    depths: np.ndarray,
+    pc: np.ndarray,
+    n_good: int,
+    included_temperature_indices: np.ndarray,
+    survival_by_good_count: np.ndarray | None,
+    batch_size: int = 128,
+) -> np.ndarray:
+    if survival_by_good_count is None:
+        return poisson_tail_mean(
+            pdet_by_temp_point_amp,
+            amplitude_grid,
+            depths,
+            pc,
+            n_good=n_good,
+            included_temperature_indices=included_temperature_indices,
+            batch_size=batch_size,
+        )
+
+    point_count = pdet_by_temp_point_amp.shape[1]
+    result = np.empty(point_count, dtype=np.float64)
+    depth_count = depths.size
+    count_count = len(survival_by_good_count)
+    for start in range(0, point_count, batch_size):
+        stop = min(start + batch_size, point_count)
+        batch_count = stop - start
+        dp = np.zeros((batch_count, depth_count, count_count), dtype=np.float64)
+        dp[:, :, 0] = 1.0
+        for t_index in included_temperature_indices:
+            rows = pdet_by_temp_point_amp[t_index, start:stop, :]
+            probs = interp_rows_by_amplitude(rows, amplitude_grid, depths * pc[t_index])
+            old = dp.copy()
+            dp[:, :, 0] = old[:, :, 0] * (1.0 - probs)
+            for k in range(1, count_count):
+                dp[:, :, k] = old[:, :, k] * (1.0 - probs) + old[:, :, k - 1] * probs
+        result[start:stop] = np.tensordot(dp, survival_by_good_count, axes=([-1], [0])).mean(axis=1)
     return result
 
 
@@ -463,6 +522,7 @@ def write_statement(path: Path, summary: dict) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser()
+    parser.add_argument("--analysis-flavor", choices=["legacy", "minimal_caldet", "minimal"], default="legacy")
     parser.add_argument("--stage09-h5", type=Path, default=CACHE / "09_characterization_probability_v1.h5")
     parser.add_argument("--stage09-summary", type=Path, default=CACHE / "09_characterization_probability_summary.json")
     parser.add_argument("--stage08-h5", type=Path, default=CACHE / "08_pdet_grid_v1.h5")
@@ -476,6 +536,31 @@ def main() -> None:
     parser.add_argument("--figure-prefix", default="10")
     parser.add_argument("--no-figures", action="store_true")
     args = parser.parse_args()
+
+    flavor = get_analysis_flavor(args.analysis_flavor)
+    if flavor.name != "legacy":
+        if args.stage09_h5 == CACHE / "09_characterization_probability_v1.h5":
+            args.stage09_h5 = flavor.stage09_h5
+        if args.stage09_summary == CACHE / "09_characterization_probability_summary.json":
+            args.stage09_summary = flavor.stage09_summary
+        if args.stage08_h5 == CACHE / "08_pdet_grid_v1.h5":
+            args.stage08_h5 = flavor.stage08_h5
+        if args.stage08_summary == CACHE / "08_pdet_grid_summary.json":
+            args.stage08_summary = flavor.stage08_summary
+        if args.ngood4_csv == CACHE / "01_records_ngood4.csv":
+            args.ngood4_csv = flavor.records4_csv
+        if args.ngood3_csv == CACHE / "01_records_ngood3.csv":
+            args.ngood3_csv = flavor.records3_csv
+        if args.stage05_npz == CACHE / "05_amplitude_prior_v1.npz":
+            args.stage05_npz = flavor.stage05_npz
+        if args.stage05_summary == CACHE / "05_amplitude_prior_summary.json":
+            args.stage05_summary = flavor.stage05_summary
+        if args.output_summary == CACHE / "10_validation_sensitivity_summary.json":
+            args.output_summary = flavor.stage10_summary
+        if args.output_statement == CACHE / "10_completeness_statement.md":
+            args.output_statement = flavor.stage10_statement
+        if args.figure_prefix == "10":
+            args.figure_prefix = flavor.figure_prefix10
 
     stage09_path = args.stage09_h5
     stage08_path = args.stage08_h5
@@ -508,34 +593,37 @@ def main() -> None:
         n_good=4,
         included_temperature_indices=temp_indices_all,
     ).reshape(tau_grid.size, E_grid.size)
-    recompute_check = np.abs(recomputed_default_n4 - stage09["p4"])
+    recompute_check = np.abs(recomputed_default_n4 - stage09["p4_intensity"])
 
     variant_maps = {
         "default_n_good_4": stage09["p4"],
         "default_n_good_3": stage09["p3"],
-        "faint_0p5_n_good_4": poisson_tail_mean(
+        "faint_0p5_n_good_4": poisson_catalog_mean(
             pdet_grid,
             stage08["amplitude"],
             stage05["depth_variants"]["faint_0p5"],
             pc,
             n_good=4,
             included_temperature_indices=temp_indices_all,
+            survival_by_good_count=stage09["survival4"],
         ).reshape(tau_grid.size, E_grid.size),
-        "faint_0p25_n_good_4": poisson_tail_mean(
+        "faint_0p25_n_good_4": poisson_catalog_mean(
             pdet_grid,
             stage08["amplitude"],
             stage05["depth_variants"]["faint_0p25"],
             pc,
             n_good=4,
             included_temperature_indices=temp_indices_all,
+            survival_by_good_count=stage09["survival4"],
         ).reshape(tau_grid.size, E_grid.size),
-        "default_n_good_4_excluding_160K_170K": poisson_tail_mean(
+        "default_n_good_4_excluding_160K_170K": poisson_catalog_mean(
             pdet_grid,
             stage08["amplitude"],
             stage05["depth_variants"]["default"],
             pc,
             n_good=4,
             included_temperature_indices=temp_indices_excluding_160_170,
+            survival_by_good_count=stage09["survival4"],
         ).reshape(tau_grid.size, E_grid.size),
     }
 
@@ -619,11 +707,14 @@ def main() -> None:
             "method_notes": str((ROOT / "trap_completeness_method.md").resolve()),
         },
         "model_notes": {
+            "analysis_flavor": flavor.name,
             "thermal_relative_tau_model": "Stage 10 uses dipole.log_energy_cross_section for relative tau(T) when available, with the analytic T^2 thermal prefactor form only as a fallback.",
             "thermal_model_source": "dipole.log_energy_cross_section" if log_energy_cross_section is not None else "analytic_fallback",
+            "stage09_default_recompute_check_target": "results/p_intensity_n_good_4 when present, otherwise results/p_characterized_n_good_4",
             "stage09_default_recompute_check_max_abs": float(np.max(recompute_check)),
             "stage09_default_recompute_check_median_abs": float(np.median(recompute_check)),
             "stage09_default_recompute_check_p99_abs": float(np.percentile(recompute_check, 99)),
+            "minimal_caldet_note": "For minimal_caldet, Stage 09 p_characterized includes empirical downstream orientation/SRH catalog survival. Stage 10 recomputes the n_good-only p_intensity diagnostic.",
             "april_only_200K_note": "Stage 10 inherits the Stage 08 April-only 200 K grid: CCD2 run IDs 160-184, repeated low-dtph rows collapsed, and image-sigma thresholds recomputed from April-only FITS.",
             "exclude_160K_170K_note": "The default n_good=4 curve was recomputed after excluding 160 K and 170 K, the dp_scan1 / SC300000 acquisition-family temperatures.",
         },

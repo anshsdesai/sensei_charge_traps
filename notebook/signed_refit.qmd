@@ -1,0 +1,439 @@
+---
+title: "The signed-refit investigation: how the trap catalog algorithm was chosen"
+---
+
+
+> **In plain terms.** This is the *story* of how the measurement method was chosen — months of
+> exploration, compressed. Short version: the old method broke at high temperature; the fix (the
+> "pedestal") snowballed into an ambitious, elaborate rewrite; independent adversarial review found the
+> elaborate rewrite was **fooling itself** — claiming more precision than the data can actually support
+> (its noise model needed an 8–30× fudge factor, and several of its cuts were secretly biased). So we
+> kept only the handful of fixes that are genuinely required by the physics and threw the rest away. The
+> survivor is the "minimal" method documented in [dipole_algorithm](dipole_algorithm.qmd). Read this if you want to know
+> *why* the algorithm is what it is and which dead ends were ruled out. This is history — nothing here
+> is a live to-do. New words are in the [glossary](glossary.qmd).
+
+**Thread status:** resolved. Do **not** revert to legacy, but do **not** ship the full signed-refit
+machinery as the production catalog either. The answer is the **minimal corrected pipeline**
+(`dipole_new.py`, `--pipeline minimal --detection calibrated`), documented as a live algorithm in
+[dipole_algorithm](dipole_algorithm.qmd). This page is the record of how that conclusion was reached.
+
+**How to read this page.** §1 is the decision — read it first. §2 is the timeline. §3 is what
+triggered the whole thing. §4 is the set of corrections that *survived* (the physically required
+ones). §5 is the machinery that was built and then **rejected** under review — skip it unless you are
+auditing the dead ends. §6 is the catalog record and the two open items.
+
+---
+
+## 1. The decision (start here)
+
+Three outcomes were on the table: revert to the legacy analysis, adopt the full signed-refit
+machinery, or take a minimal synthesis. The answer is the **minimal synthesis** — because legacy is
+genuinely broken above ~165 K (the readout pedestal, §3), while the full machinery (§5) was built and
+then found under two adversarial reviews to claim precision the data cannot support. So: keep the
+corrections the physics *requires*, and demote or drop everything that only buys apparent precision.
+
+Every proposed change, and its verdict:
+
+| proposed change | verdict | why |
+|---|---|---|
+| **Signed intensity** (keep the dipole's sign) | **KEEP** | the pedestal dipole can point opposite the pump; `abs()` destroys the information the orientation gate later needs |
+| **Constant pedestal** (3-parameter fit) | **KEEP** | a real `t_ph`-independent high-T dark-current deferral; without it χ² rejects bright hot curves (§3) |
+| **Absolute error bars** (`absolute_sigma=True`) | **KEEP** | a genuine SciPy bug — the covariance was silently rescaled by reduced χ², moving every significance cut |
+| **Physical per-point error model** | **KEEP (pooled)** | the legacy patch σ measures fixed-pattern nonuniformity, not repeat noise; use a pooled (T, quadrant) temporal-noise floor, **not** thousands of regional covariances |
+| **Profile fit in τ** | **KEEP** | amplitude A and pedestal I0 are linear at fixed τ → a robust profile with clean one-sided limits |
+| **Empirical detection threshold** | **KEEP (simplified)** | the fixed Δχ² = 11.83 admits ~2% of nulls, not 0.27%; calibrate per-temperature on trap-free controls instead |
+| **Orientation consistency** | **KEEP** | one physical trap pumps in one direction; rejects the blends `abs()` used to hide |
+| **Simple SRH** (no intrinsic scatter, no outlier rejection) | **KEEP** | the robust fit + intrinsic scatter *raised* decoy acceptance (§4) |
+| **Conservative 3σ finder** (vs 2.5σ) | **KEEP the 3σ point** | 91% strong-signal completeness at ~10× less horizontal-structured leakage than 2.5σ (§4) |
+| Regional covariance (per-region noise) | **DEMOTE** | thousands of region-specific covariances buy precision the data cannot support |
+| Fitted overdispersion φ = 8–30 | **DROP** | a tuned knob fitted to the very residual-width target it is then judged against — not a validated model (§5) |
+| 2.5σ finder | **DEMOTE** | more candidates, but ~10× more structured leakage |
+| 160/170 K exclusion (`no_160_170`) | **DEMOTE** | confounds the only February acquisition family with the coldest, highest-leverage Arrhenius anchor (§5) |
+| Robust SRH outlier rejection + intrinsic scatter | **DROP** | accepts more decoys; unnecessary for the deliverable |
+
+"Demote" = kept only as a **systematic/diagnostic variant** that must pass end-to-end signal + null
+calibration before it could ever define the catalog; it never does in production.
+
+The result is implemented as `dipole_new.py` (the "minimal" pipeline) with `--detection calibrated` —
+the production algorithm in [dipole_algorithm](dipole_algorithm.qmd). Three catalogs are carried together and their
+spread propagated to the τ(135 K) population and the CCD simulation: **legacy**, **minimal corrected
+(primary)**, and **full signed-refit (systematic comparison)** (§6).
+
+**Why this is the right altitude** (memory `analysis-figure-of-merit`): the deliverable is the masked
+single-electron residual, not per-trap τ precision. σ is 99.7% E-degenerate and is absorbed into the
+V_p systematic ([physics](physics.qmd) §3), so the regional-covariance / φ-overdispersion machinery buys apparent
+precision the data cannot support — while the finder / pedestal / orientation corrections are
+well-targeted and physically required. The minimal pipeline keeps the second set and drops the first.
+
+---
+
+## 2. How it unfolded (timeline)
+
+The legacy per-temperature dipole fits failed above ~165 K. The fix (a readout pedestal) required, in
+turn: signed intensities, a physical error model, an honest detection threshold, orientation
+consistency, and a re-examined energy fit. Each change exposed the next, and an ambitious "full refit"
+(a 10-step runbook with regional covariance, fitted overdispersion, robust outlier rejection,
+intrinsic scatter, and acquisition-family exclusion) was built — then found to over-claim precision.
+The de-scoping to the minimal pipeline is the deliverable of the whole thread.
+
+| date | file (all now in `attic/`) | role |
+|---|---|---|
+| 2026-06-12 | `SIGNED_REFIT_AUDIT.md` | first change audit — the pedestal discovery (§3) |
+| 2026-06-13 | `SIGNED_REFIT_PHYSICS_AUDIT.md` | physics audit — 4 problems + the corrected refit sequence |
+| 2026-06-13 | `SIGNED_REFIT_RUNBOOK.md` | the Step 1–10 execution checklist (the "full machinery", §§4–5) |
+| 2026-06-13 | `SIGNED_REFIT_RUNBOOK_S01_S05_AUDIT.md` | *earlier unpolished draft* of the Steps 1–5 review (redundant) |
+| 2026-06-13 | `SIGNED_REFIT_STEP1_5_REVIEW.md` | adversarial review, Steps 1–5 (§5) |
+| 2026-06-13→14 | `signed_refit_*.md` (13 files) | per-step calibration reports |
+| 2026-06-15 | `SIGNED_REFIT_STEP6_10_REVIEW.md` | adversarial review, Steps 6–10 (§5) |
+| 2026-06-15 | `MINIMAL_SIGNED_REFIT_RECOMMENDATION.md` | **the decision** — the minimal synthesis (§1) |
+
+---
+
+## 3. The trigger — high-T fit failures are a readout pedestal, not noise
+
+The legacy per-temperature dipole fits (`intensity = N_pumps·coeff·(e^{−t/τ} − e^{−8t/τ})`, coeff ≥
+0, forced through zero) failed above ~165 K: the χ² test rejected bright hot curves. The cause is a
+real, `t_ph`-**independent** dipole floor — a charge deficit at the trap pixel with charge deferred
+along the readout direction, present in every image and growing with temperature. Mechanism: the trap
+acts as a CTI / deferred-charge defect on the rising high-T dark-current background during readout.
+The floor is ~64 e⁻ at 150 K rising to ~700 e⁻ at ≥175 K, and `floor/σ` crosses 1 at 160–165 K —
+exactly where the pass-rate collapses.
+
+**Fix.** Add a constant offset (pedestal) to the model and switch the intensity to **signed** (the
+pumped dipole and the pedestal dipole can point in different directions). `model + offset` restores
+reduced χ² ≈ 0.15–1 at all temperatures; injection with a constant pedestal recovers τ without visible
+bias. This established the two corrections that anchor the whole minimal pipeline: the **signed
+intensity** and the **constant pedestal**. Everything in §4 followed from making those two work
+honestly; everything in §5 was the over-reach that followed from trying to make them *maximally
+precise*.
+
+---
+
+## 4. The corrections that were kept — and the evidence for each
+
+These are the survivors of §1's decision table. Their **live implementation** is in
+[dipole_algorithm](dipole_algorithm.qmd); here is the investigation evidence that made each one *required* rather than
+optional.
+
+**Absolute error bars (a genuine bug).** Both fit stages passed `sigma=` to `curve_fit` without
+`absolute_sigma=True`, so SciPy rescaled the covariance by reduced χ² (`pcov_rel = pcov_abs·χ²/dof`).
+Those rescaled errors fed amplitude significance, the `σ_τ/τ ≤ 0.5` cut, SRH weights, and quoted E/σ
+errors — consequential where reduced χ² < 1 (median ~0.44 at 207 K → stored errors only √0.44 ≈ 0.66
+of the supplied). Fixed behind `errors_are_absolute=True`.
+
+**Physical per-point error model (simplified to pooled).** The legacy patch σ measures spatial
+nonuniformity, not the repeated uncertainty of a fixed pixel pair, so it overestimates the random
+noise ~5×. The physics audit noted the *fully* rigorous version (a scan-level empirical covariance
+with a separate signal-dependent pumping-variance term) — but that path is exactly what over-reached
+in §5. The kept version is the **pooled** temporal-noise floor: one σ_base per (T, quadrant) measured
+from trap-free pixel pairs, plus per-pixel shot noise. See [dipole_algorithm](dipole_algorithm.qmd) §2.
+
+**Empirical detection calibration.** The fixed Δχ² = 11.83 is **not** a χ² with 2 dof: under the
+constant-only null the pumped amplitude is zero and τ is undefined (violating Wilks regularity), and
+the τ scan adds a look-elsewhere effect — so its false-positive rate must be measured, not assumed. It
+admits **1.97%** of nulls (≈2.3σ, not the intended 0.27%). Two calibrations exist:
+
+- The investigation's **GLS max-Δχ² over an 801-τ grid** on 8,192 held-out controls (add-one
+  finite-sample p-value): aggregate null FPR 0.081%, thresholds smooth in the 20–50 band (125 K → 25.2
+  … 210 K → 23.6). This piece is publishable as-is and is retained as a rigorous **cross-check**.
+- The **production `minimal_caldet`** catalog uses a simpler self-consistent calibration: the same
+  `fitTrapIntensity` run on trap-free controls, `(1−0.1%)` empirical quantile of
+  `delta_chi2_vs_constant` per temperature (`detection_calibration_minimal.npz`) — documented in
+  [dipole_algorithm](dipole_algorithm.qmd) §3.1. The two calibrate *different* statistics (max-GLS-Δχ² over a grid vs the
+  single live `curve_fit` Δχ²), so their numbers legitimately differ ~2–3×. (The live table's anomalous
+  170 K value is tracked in §6.)
+
+**Conservative 3σ finder.** A pre-declared scan chose the operating point for completeness at ≥4
+robust-image-σ injections subject to null gates:
+
+| finder config | strong-signal completeness | horizontal-axis FPR | union candidates | gate |
+|---|---:|---:|---:|---|
+| legacy_reference (3σ, product, 30% balance) | 79.99% | 0.000% | 5,171 | FAIL |
+| robust_separate_3σ_p2 | 91.16% | 0.0116% | 5,341 | PASS |
+| robust_separate_2.5σ_p2 | 94.32% | 0.1159% | 8,241 | PASS |
+
+The full refit selected the 2.5σ point (8,241 candidates); the **minimal recommendation preferred the
+conservative 3σ point** — 91% completeness at ~10× less horizontal-structured leakage. Both lobes must
+be *separately* significant at 3σ (product-only rules can admit one sub-threshold lobe).
+
+**Orientation consistency.** Structurally prevents any opposite-sign merge into a single-trap fit and
+adds a persistent-horizontal-morphology class. Injection single-orientation efficiency 99.6%, sign
+accuracy 100%, end-to-end vertical-null rate 0.0%. Adopted verbatim into minimal.
+
+**Simple SRH (no intrinsic scatter, no outlier rejection).** Catalog purity rides on the energy-fit
+rejection, so what that fit accepts matters. End-to-end decoy control:
+
+| control | ≥1 good T | ≥4 good T | characterized |
+|---|---:|---:|---:|
+| 1600 random pairs | 73.94% | 21.63% | 0.81% |
+| 1004 horizontal-null pairs | 87.95% | 46.61% | 2.89% |
+
+The proposed robust energy fit with intrinsic scatter *raised* decoy acceptance (0 dex → 7.5%; 0.20
+dex → 13.6%) — so it was **not** wired into selection. Minimal uses a plain reduced-χ² GOF instead
+(the X≈3-vs-10 tradeoff is discussed in [dipole_algorithm](dipole_algorithm.qmd) §3).
+
+**Profile fit in τ.** At each fixed τ, amplitude A and pedestal I0 are solved by GLS (both linear at
+fixed τ), profiling over an 801-point log-τ grid with boundary/multimodal flags — the robust fitter
+that produces the one-sided limits the minimal pipeline retains near scan edges.
+
+---
+
+## 5. What was built and then rejected (audit detail — skip unless auditing the dead ends)
+
+On top of the kept corrections, the full refit added a **regional covariance** noise model, a **fitted
+overdispersion** term, a **2.5σ finder**, an **acquisition-family exclusion**, and a **Wilks-based SRH
+cut**. Two adversarial reviews (a physicist/statistician pass on Steps 1–5, then on Steps 6–10)
+concluded the *engineering* (provenance, plumbing, no numerical collapse) was sound but the **physics**
+of the E/σ catalog was **not closed**. Each rejected piece with the finding that killed it:
+
+**The empty-control variance through-line (BLOCKING).** Everything in the regional noise model (Steps
+2–4) is calibrated and validated on control pairs that are **empty by construction**. The central
+risk — that a real pumped dipole (a charge transfer sitting on more charge) has variance the empty
+controls cannot see — is never measured. So the covariance applied to candidates is a **lower bound**
+on their true variance → candidate χ² inflated → p-values too small → amplitude/τ significances
+overstated → the Δχ² = 1 τ intervals **under-cover on real bright traps**. It is already visible in the
+closure: whitened width and tail rate *rise* with control-pair brightness (quartile 1→4: width
+1.025→1.035, `p<0.05` 7.49%→8.28%) even within the tiny brightness range of nulls. The nominal χ² tails
+also never close (constant-model `p<0.05` = 7.7% vs 5% target; 183 K → 9.2%), and the Step-5 coverage
+"validation" is **circular** (it draws synthetic data from the same covariance the fitter uses).
+
+**The φ = 8–30 overdispersion knob (BLOCKING).** To force the candidate residual widths to close, a
+free per-amplitude-bin multiplier φ was fitted onto the independent-Bernoulli pumping variance
+`3000·q(1−q)`. Frozen factors **φ = 8.31, 16.06, 30.00, 23.04** (non-monotonic; the cap was raised
+20→100 so φ≈30 is genuinely data-demanded). This is the signature of an unmodeled, amplitude-correlated
+variance term absorbed by a free multiplier fitted to the very residual-width target it is then judged
+against — the binomial model fails at face value and is rescued by a 30× factor. **And it couples:**
+the same φ that closes Step 9 widens τ intervals → smaller Step-10 deviance → more `srh_consistent`, so
+both the closure "PASS" and the headline SRH fraction ride on the same un-validated knob, in the same
+direction.
+
+**Cold-τ Malmquist selection bias (HIGH).** At 130–140 K the dominant Step-9 rejection is
+`interval_not_two_sided` (135 K: 3,145 of 3,379 detected keep no lifetime). A lifetime is assigned only
+where the profile brackets τ on *both* sides inside the dwell window — selection on the noisy *measured*
+τ near the window edge. Downward τ fluctuations bracket and survive; upward ones hit the long-τ limit
+and are dropped → surviving cold τ are biased **short** → the Arrhenius slope E is biased **low**, on
+exactly the cold lever arm that sets the energy.
+
+**Wilks SRH GOF (HIGH).** The Step-10 SRH-consistency p-value is `chi2.sf(Σ profile Δχ², N−2)`, but
+those profiles are deliberately non-parabolic/asymmetric, so their sum is not χ²_{N−2}. The catalog's
+most consequential number — **47% non-SRH** — rests on an uncalibrated reference (the same Wilks
+assumption the detection calibration had already disproved).
+
+**Acquisition-family confound (HIGH).** Step 1's frozen manifest revealed that 160 K and 170 K are the
+**only** points from the February `dp_scan1` family (300k charge shifts, 1.5× illumination); everything
+else is March–April `temp_scan_run1` (200k shifts). This aliases temperature with acquisition family at
+the cold, high-leverage end of the Arrhenius lever arm. The `no_160_170` promotion then *excludes* those
+points — but its trigger used a mis-estimated significance (hypot of two independently seeded bootstraps
+on *paired* data, ignoring their correlation), and dropping them removes the only independent cold
+anchor, so the energy shift is degenerate between "family" and "lever arm."
+
+**Supporting risks.** The full refit's **+0.83 in ln σ (≈2.3×) vs legacy** propagates directly into
+simulation capture rates and needs a *cause* (gain, signed model, or SRH-constant convention), not just
+a number (M3). A load-bearing **gain of 400 ADU/e⁻** is unconfirmed (sidecars carry only the fallback
+200) (M2), and the structured-purity margin at the 2.5σ finder is thin — the only barrier between
+structured backgrounds and the catalog caught just **2** sites (M5).
+
+**What it produced (for the record).** Step-9 intensity cutflow: 8,241 candidates → 38,000 accepted
+candidate-temperature fits → **2,703 final single-trap sites** (1,743 `single_positive`, 960
+`single_negative`, 411 `ambiguous_sign_conflict`, 341 `dual_response`, 2 `structured_background`).
+Step-10 simple SRH: 2,703 → 2,407 fit successes → **1,287 SRH-consistent** (`no_160_170` variant), of
+which only 711 are good-energy in *both* the full refit and legacy.
+
+**Cleared on inspection:** an unintended dwell-dependent `null_template` subtraction was shown benign
+for τ (max template Δχ²-vs-constant 0.12; it carries no pump-shaped component and acts like a
+common-mode removal the offset absorbs).
+
+**Net verdict:** Steps 1–10 are PASS as *engineering* gates, BLOCKED as *physics* validation of the
+E/σ catalog that would seed `tau_at_<T>k_hist.npz` and the simulation — which is precisely why the
+minimal pipeline keeps §4 and drops this section.
+
+---
+
+## 6. The record — three catalogs and open items
+
+| quantity | legacy (`dipole.py`) | full signed refit | minimal (`dipole_new.py`) |
+|---|---:|---:|---:|
+| candidates / detected | 5,171 | 8,241 (2.5σ) | 9,333 (`minimal_caldet`) |
+| ≥4 good-T sites | 2,514 | 6,545 | — |
+| characterized / SRH-consistent | 2,135 | 1,287 (`no_160_170`) | ~3,798 |
+| in both vs legacy | — | 711 | ~1,061 |
+
+Low overlap between any two is intrinsic: the pedestal + signed + physical-error changes are a real
+re-selection, not a small correction. The full-refit's low characterized count (1,287) partly reflects
+its cold-τ Malmquist rejection and Wilks SRH cut (§5), both of which the minimal pipeline avoids by
+using reduced-χ² GOF and retaining one-sided limits. (Do not confuse the full-refit∩legacy overlap of
+**711** with the minimal∩legacy overlap of **1,061** — different comparisons.)
+
+### Open items
+
+**(a) The live 170 K detection threshold = 17.0 — suspected artifact.** In the production
+`detection_calibration_minimal.npz` table the 170 K threshold is **17.0**, a ~4× anomalously *low*
+outlier vs its ~70 neighbours (every other temperature is equal-or-more conservative than the legacy
+fixed 11.83). It is **not** explained by the 170 K data (normal coverage, normal real-trap Δχ² ≈ 1440),
+so it is a suspected control-calibration artifact — likely an under-sampled per-temperature quantile,
+possibly tied to 170 K being one of the two February `dp_scan1` frames (1.5× illumination). Impact is
+≤0.3% of the catalog (~11 characterized traps rely on a marginal 170 K point to reach 4 good
+temperatures), deliverable-neutral, so it was left as-is. **To settle it:** rebuild the 170 K control
+calibration (needs the FITS + `getDipoleSpectra2` stage) and compare against the smooth GLS bar (§4);
+if confirmed artifactual, floor 170 K to its neighbour level (~70). Referenced from
+[dipole_algorithm](dipole_algorithm.qmd) §3.1.
+
+**(b) The high-T Arrhenius lean — measured, fork settled, bracketed (2026-07-03).** See the
+dedicated §6b below; the summary is: the lean is a smooth curvature whose shape matches thermally
+activated (multiphonon) capture with an effective barrier E_b ≈ 0.16 eV (Henry–Lang), the
+instrumental `t_ph`-pedestal explanation is excluded, and the bracketed impact on the τ135 census
+is small (τ135 > 1 hr fraction unchanged at 1.47%, UL-slope driver band −7%). Carried as a physics
+systematic in the results-page ledger.
+
+### 6b. The high-T Arrhenius lean
+
+**The phenomenon.** For each trap the per-temperature τ values should fall on a straight SRH line
+in log τ vs 1/kT; the line's slope and intercept (E, σ) are what extrapolate the trap to the common
+reference τ135 that seeds the simulation. Above ~165 K the measured τ instead sits *below* the line
+set by the cold points, by an amount that grows with temperature. Because the long-τ135 tail of the
+census — the population that drives the exposure-dependent upper-limit slope — is caught
+*exclusively at hot temperatures* (its τ only drops into the 5×10⁻⁵–1 s delay window when hot;
+τ135 is a pure extrapolation for those traps), a hot-temperature bias feeds straight into the
+headline number, which is why this item was tracked as the top open catalog systematic.
+
+**The lean measured on the live catalog.** Using the 2,766 characterized traps that have ≥3 good
+cold temperatures (≤165 K) plus hot points, fitting each trap's SRH line through its cold points
+only and pooling the hot-point offsets gives the profile in @fig-lean-profile: smooth, monotonic,
+−0.026 dex at 170 K to −0.137 dex at 210 K, measured to ~0.002–0.005 dex. As a *summary number*
+the profile is described by δ(T) ≈ −1.5·log₁₀(T/165 K) dex; but that empirical descriptor must
+**not** be read as "σ(T) ∝ T^1.5" — a true power-law mechanism, processed through the same
+cold-anchored fit as the data, leaves a residual of a different shape and does not fit (see the
+mechanism comparison below). An earlier note here that the excess power "lands at exactly 3/2, the
+N_v exponent" was an artifact of comparing the raw profile against an unprocessed template, and is
+retracted.
+
+```{python}
+#| label: fig-lean-profile
+#| fig-cap: "The high-T Arrhenius lean, quantified on the minimal catalog for the first time (earlier 0.1–0.2 dex numbers were from the signed full-refit catalog). Each point is the median offset of that temperature's τ values from the traps' own cold-anchored SRH lines; error bars are bootstrap errors on the median. The dashed curve is a one-parameter empirical descriptor (n ≈ 1.5) — a convenient summary of the size and smoothness, not a mechanism: see @fig-lean-mechanisms for the physically processed shape comparison."
+import sys, os
+sys.path.insert(0, os.path.abspath("figures"))
+import make_figures
+
+make_figures.arrhenius_lean_profile(save=False)
+```
+
+**What it is not: the `t_ph`-dependent pedestal (instrumental fork) is excluded.** The candidate
+"fixable" explanation was a pedestal that secretly grows with pump dwell (dark current accumulated
+during the 3,000-cycle pump train — pedestal ∝ t_ph), which the constant-offset intensity fit would
+not model. Tested 2026-07-03 on the live catalog, in two halves (one-off scripts and JSON outputs in
+`claude_scripts/high_t_pedestal_bound/`, local/untracked; method and numbers recorded here):
+
+1. *Bound:* in the signal-free tail (t_ph > 10 τ) of accepted short-τ curves, where any pedestal
+   growth would appear as a residual trend, the pooled per-trap slopes bound the growth to
+   **|b| ≲ 2–11 e⁻ per second of t_ph** at the well-sampled hot temperatures (≲ 74–79 e⁻/s at the
+   sparsest), and the small formally-significant slopes flip sign between neighbouring temperatures
+   — not the coherent positive, dark-current-scaled growth the hypothesis predicts.
+2. *Requirement:* injecting b·t_ph into 300 realistic synthetic curves per temperature (real delay
+   grids, errors, and catalog parameters) and refitting with the exact live 3-parameter model shows
+   a 0.15 dex τ shift needs **b ≈ 390–3,400 e⁻/s** — a 40–230× gap above the bound — and the shift
+   comes out with the **wrong sign** (a growing pedestal stretches τ *up*; the lean is *down*).
+   At the required sizes the curves also fail the live reduced-χ² < 10 gate (pass fraction 0–28%),
+   so such contamination could not hide inside the good-fit catalog. The tail-slope estimator
+   recovers injected b at 97–123%, closing the loop between the two halves.
+
+This is consistent with the stage-12 diagnosis (`trap_completeness_method3/agents/
+12_high_temp_misfit.md`): the pedestal is a t_ph-independent *readout* deferred-charge dipole, and
+the raw-image monopole test already excluded a dark-current generation site.
+
+**What it is: the shape matches thermally activated (multiphonon) capture.** First, the model
+side is verified by derivation: the code's prefactor is v_th·N_v with v_th = √(3kT/m_cond) ∝ T^½
+and N_v = 2(2π m_dens kT/h²)^{3/2} ∝ T^{3/2}, i.e. the fixed T² in
+`dipole_new.log_energy_cross_section` is algebraically correct for constant masses — the lean is a
+deviation from that model, not an implementation error. Candidate mechanisms were then confronted
+with the measured profile *self-consistently*: each mechanism's addition Δ(T) to ln τ is first fit
+with the SRH family a + b/kT over the cold temperatures (exactly what the cold-anchored line does
+to the data — it absorbs any straight-Arrhenius component of a mechanism), and only the hot-side
+residual is compared to the measurement (@fig-lean-mechanisms):
+
+- **Temperature-dependent hole masses** (parameter-free): the code uses constant `M_DENS_HOLE =
+  0.94`, `M_COND_HOLE = 0.41`; the true m_dens(T) rises with T [Green 1990, JAP **67**, 2944,
+  via the N_v(T) quadratic fit to Green's data, N_v = (−0.17 + 0.93·t + 2.34·t²)×10¹⁹ cm⁻³,
+  t = T/300 K]. Right sign, but far too small and too straight after processing: χ²/dof ≈ 1100.
+  (Green's data are 300–500 K; the extrapolation only strengthens the "too small" conclusion.)
+- **Gap-shrinkage / entropy** [Thurmond 1975, J. Electrochem. Soc. **122**, 1133; Van Vechten &
+  Thurmond 1976, PRB **14**, 3539]: a trap level pinned below the conduction band has a
+  hole-emission depth that shrinks with the gap (Varshni α = 4.73×10⁻⁴ eV/K, β = 636 K). Even at
+  full conduction-band pinning the processed shape is wrong: χ²/dof ≈ 740.
+- **Power-law σ(T) ∝ T^n**: processed self-consistently, the shape does not fit for any n
+  (χ²/dof ≈ 180 at the fit boundary n = 6) — this is what retires the "T^1.5" reading of the
+  empirical descriptor.
+- **Thermally activated capture** [Henry & Lang 1977, PRB **15**, 989: multiphonon capture,
+  σ(T) = σ_LT + σ_∞e^{−E_b/kT}, T-independent at low T, activated at high T, with measured
+  barriers 0–0.56 eV]: fits the profile with an effective ensemble barrier **E_b ≈ 0.16 eV**
+  (χ²/dof ≈ 5.8, and no other tested shape comes within a factor 30). Detailed balance carries the
+  same activated factor into the emission prefactor, which is exactly a "knee + growing lean".
+  The residual misfit (~2–3× the tiny bootstrap errors) is consistent with trap-to-trap barrier
+  heterogeneity — the median of an ensemble of activated curves is not itself exactly activated.
+
+Two instrumental discriminators on the data support bulk physics: the lean is **uniform across the
+four amplifier quadrants** (χ²/n = 0.6–1.7 against the pooled profile — not electronics), and it is
+**independent of where τ sits in the delay window** at fixed T (τ-tercile medians at ≥190 K:
+−0.111/−0.116/−0.116 dex — not a window-edge fit artifact). The standing guardrail is unchanged:
+the SRH T⁻² prefactor stays physics-fixed, the lean is **not** absorbed into a fitted power, and
+the identification of the activated shape is a diagnosis, not a pipeline change — the systematic
+is carried by the mechanism-independent bracket below, which uses the measured δ(T) directly.
+
+```{python}
+#| label: fig-lean-mechanisms
+#| fig-cap: "Literature mechanism shapes against the measured lean profile, every mechanism processed exactly like the data (its straight-Arrhenius component absorbed by a cold-anchored SRH fit before comparing hot-side residuals). The temperature-dependent hole masses (Green 1990) and gap-shrinkage/entropy (Thurmond; Varshni) candidates are far too small and too straight; a pure power law σ ∝ T^n has the wrong curvature at any n; thermally activated multiphonon capture (Henry & Lang 1977) with an effective barrier E_b ≈ 0.16 eV is the only tested shape that follows the data."
+make_figures.arrhenius_lean_mechanisms(save=False)
+```
+
+**The bracket, and why the impact is small.** The systematic is an extrapolation-model ambiguity:
+variant A fits each trap's SRH line with the hot points as measured (the production pipeline);
+variant B first raises the hot points by −δ(T) (the median lean removed, transporting the cold-end
+SRH behaviour to the hot temperatures — the only well-defined "cold-anchored" option for the tail
+traps, which have *no* cold points). Both variants use the identical live energy-fit call, and
+variant A reproduces the stored production τ135 exactly (median |Δlog₁₀τ135| = 0.0000).
+@fig-lean-bracket shows the result: the **τ135 > 1 hr tail fraction is unchanged (1.47% → 1.47%)**
+and the UL-slope driver band (τ135 ∈ 3×10⁵–5×10⁷ s) moves **30 → 28 traps (−7%)**; movers shift by
+a median −0.08 dex in τ135 and −0.016 eV in E. The effect is small for a geometric reason: for the
+hot-only tail traps the correction lifts all their points by a nearly common amount (+0.06 to
++0.14 dex across 170–210 K), which mostly re-normalizes the line rather than re-tilting it, and for
+cold-anchored traps 135 K sits next to their cold points, which the correction does not touch.
+
+*Is the bracket conservative if the mechanism is true?* (2026-07-05 review question; **resolved
+2026-07-06 with a third variant**.) The worry ran: at 135 K activated capture gives σ → σ_LT,
+smaller than the effective σ the hot points reflect, so the mechanism-implied τ135 of a hot-caught
+trap might be *longer* than variant A — outside the bracket on the dangerous side. Variant C tests
+it directly: take the ensemble Henry–Lang model as true, fit each trap with the identical live
+energy-fit call on mechanism-corrected points (each lnτᵢ gets +ln(1 + R e^{−E_b/kTᵢ}), recovering
+E and σ_LT), and back-correct the extrapolation at 135 K. The result is the **opposite** of the
+worry, because the intuition missed the slope renormalization: in the activated regime the
+mechanism is exactly Arrhenius with *apparent* slope E + E_b, so the straight production line
+extrapolates steeper to cold and **over**-lengthens τ135. Analytically, a deep-regime hot-only
+trap overshoots by ln(1+x) − ln(x) with x = R e^{−E_b/k·135 K} ≈ 1.4, i.e. ≈ +0.24 dex; measured
+on the catalog, hot-only traps move by a median Δlog₁₀τ135(C−A) = **−0.211 dex** (97.8% of them
+downward, zero traps entering the >1 hr tail). Census impact: the tail fraction is **1.47% under
+all three variants**; the driver band is 30 (A) / 28 (B) / 26 (C). **Production (variant A) is
+therefore the conservative, dangerous-side end of the bracket**, and no widening is needed.
+(One-off check: `claude_scripts/high_t_pedestal_bound/lean_bracket_variantC.py`;
+@fig-lean-bracket below re-derives variant C from the catalog at render time. Caveat: C applies
+the ensemble (R, E_b) to every trap — per-trap barrier heterogeneity spreads individual shifts —
+but the overshoot's sign is generic for any trap whose lean is activated in origin.)
+
+Note this **supersedes the earlier expectation** (from the signed-refit era) that the lean halves
+the long-lived tail: the old 2.4% → 1.1% comparison was legacy-catalog vs full-refit-catalog — two
+different pipelines, selections, and populations — and mostly measured catalog churn, not the
+isolated lean effect. Within the live catalog, the isolated lean effect on the tail is ≈ 0 and on
+the driver band ≈ −7%.
+
+```{python}
+#| label: fig-lean-bracket
+#| fig-cap: "The lean bracket on the extrapolated τ135 census. Variant A (black) refits every characterized trap with the live energy-fit call on the points as stored, reproducing the production τ135 exactly; variant B (red) first removes the measured median lean from the hot points; variant C (blue) takes the fitted Henry–Lang activated σ(T) as true and extrapolates with it. C lands *below* A (median −0.21 dex for hot-only traps) — the straight-line production extrapolation is the conservative end. The long-lived tail (right of the 1 hr line) is identical under all three variants and the UL-slope driver band (shaded) barely moves."
+make_figures.arrhenius_lean_bracket(save=False)
+```
+
+**Disposition.** The lean is real, precisely measured, not instrumental, and its bracketed impact
+on the quantity that matters (the long-τ135 seed population) is **small**: ≤7% on the driver-band
+count, 0% on the >1 hr tail fraction. It enters the results-page systematics ledger as a one-line
+bracketed item at that size — far below the V_p decade band — and needs no dedicated campaign arm.
+Physically it is identified (by shape) as thermally activated multiphonon capture with an effective
+ensemble barrier E_b ≈ 0.16 eV; pinning that down further (per-trap barriers, σ_∞ scale) is a
+catalog-side physics project, not a deliverable blocker.

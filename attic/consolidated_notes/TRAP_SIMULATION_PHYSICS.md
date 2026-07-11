@@ -182,16 +182,24 @@ linearly with density).
   said "factor of 2" and was corrected).
 - **Rates are per pixel**: exposure-independent 9.94e-5 e/pix/image, exposure-dependent
   4.36e-5 e/pix/day (UR quadrant, SENSEI:2024yyt). Old "superpix" comments were wrong.
-- **Inter-image dead time ≈ 0** in real operations → the simulation's instantaneous clear with
-  no trap interaction is acceptable. (Traps do not release unobserved between images.)
+- **Inter-image dead time ≈ 0** in real operations. The default `sequencer` clear follows
+  `temp_scan_run1_clearseq.xml`: 1500 fast vertical shifts followed by 10 slow shifts while
+  retaining trap occupancy. Free surface charge remaining at the clear boundary is discarded.
+  The former no-interaction behavior remains available as `--clear-mode instantaneous`.
+- The clear uses the same effective-pixel SRH model as readout. It includes packet motion,
+  same-well recapture during each dwell, and capture by downstream active-area traps, but does
+  not resolve the six individual vertical clock phases because trap sub-phase locations are not
+  available.
 
 ## 6. Known remaining simplifications (assessed as minor, in order of relevance)
 
 1. Charge resident in a trap's own pixel during exposure is never captured (interaction runs on
    the cleared state before injection). Second-order: column transits during readout load the
    relevant traps with near-certainty anyway.
-2. Exposure-independent (readout-generated) charge is injected before readout, so it sees the
-   full column of traps instead of the remaining transfer distance — mildly conservative.
+2. Exposure-independent charge defaults to `post_readout`: one shared random realization is
+   added to the paired trap/no-trap images after active-area trap transport, so this
+   readout-generated population cannot enter an active-area trap. The legacy behavior remains
+   available as `--exp-indep-charge-mode pre_readout`.
 3. No serial-register traps (tpix_horizontal unused for trap physics).
 4. V_p is a single uniform-density number; in reality trap position within the well modulates
    the local density (traps outside the carrier cloud capture less). Absorbed by the V_p band.

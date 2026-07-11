@@ -19,6 +19,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from dipole import intensity_function
+from dipole_new import intensity_function_offset
 from trap_completeness_method3.src.single_curve_recovery import (
     N_PUMPS,
     _as_builtin,
@@ -29,6 +30,7 @@ from trap_completeness_method3.src.single_curve_recovery import (
     _load_stage04_grid,
     _summary,
 )
+from trap_completeness_method3.src.analysis_flavors import get_analysis_flavor, load_delta_chi2_thresholds
 
 
 STAGE_ID = "07_single_temperature_pdet"
@@ -45,6 +47,8 @@ CUT_LABELS = [
     "p_value",
     "max_intensity_lt_3_mean_intensity_err",
     "max_intensity_lt_3_image_sigma",
+    "amplitude_significance_lt_3",
+    "delta_chi2_vs_constant",
     "tau_relative_error_gt_0p5",
 ]
 
@@ -101,6 +105,19 @@ def _peak_erf_approximation(
     }
 
 
+def _true_intensity_for_flavor(
+    seconds: np.ndarray,
+    coeff: float,
+    tau: float,
+    offset: float,
+    analysis_flavor: str,
+) -> np.ndarray:
+    flavor = get_analysis_flavor(analysis_flavor)
+    if flavor.fit_offset:
+        return intensity_function_offset(seconds, coeff, tau, offset)
+    return intensity_function(seconds, coeff, tau)
+
+
 def _simulate_grid_point(
     rng: np.random.Generator,
     seconds: np.ndarray,
@@ -109,9 +126,15 @@ def _simulate_grid_point(
     local_sigma: float,
     image_sigma: float,
     realizations: int,
+    analysis_flavor: str = "legacy",
+    temperature_k: int | None = None,
+    delta_chi2_threshold_by_temperature: dict[int, float] | None = None,
 ) -> dict[str, Any]:
+    flavor = get_analysis_flavor(analysis_flavor)
     coeff = amplitude / N_PUMPS
-    true_intensity = intensity_function(seconds, coeff, tau)
+    true_offset = 0.0
+    true_coeff = -coeff if flavor.fit_offset else coeff
+    true_intensity = _true_intensity_for_flavor(seconds, true_coeff, tau, true_offset, flavor.name)
     intensity_err = np.full(seconds.size, local_sigma, dtype=float)
     controlling_counter: Counter[str] = Counter()
     failed_cut_counter: Counter[str] = Counter()
@@ -122,7 +145,15 @@ def _simulate_grid_point(
 
     for _ in range(realizations):
         noisy_intensity = true_intensity + rng.normal(0.0, local_sigma, size=seconds.size)
-        fit = _fit_one_curve(seconds, noisy_intensity, intensity_err, image_sigma)
+        fit = _fit_one_curve(
+            seconds,
+            noisy_intensity,
+            intensity_err,
+            image_sigma,
+            analysis_flavor=flavor.name,
+            temperature_k=temperature_k,
+            delta_chi2_threshold_by_temperature=delta_chi2_threshold_by_temperature,
+        )
         controlling = str(fit["controlling_failure_cut"] or "fit_failed")
         controlling_counter[controlling] += 1
         if fit["failed_cuts"]:
@@ -239,15 +270,18 @@ def run_stage(
     alt_realizations: int,
     seed: int,
     alt_seed: int,
+    analysis_flavor: str = "legacy",
 ) -> dict[str, Any]:
+    flavor = get_analysis_flavor(analysis_flavor)
     workspace = root / "trap_completeness_method3"
     cache_dir = workspace / "cache"
     cache_dir.mkdir(parents=True, exist_ok=True)
 
     produced_at = datetime.now().astimezone().isoformat(timespec="seconds")
-    output_h5 = cache_dir / f"07_single_temperature_pdet_{temperature_k}K_v1.h5"
-    output_json = cache_dir / "07_single_temperature_pdet_summary.json"
-    output_plot = cache_dir / "figures" / f"07_single_temperature_pdet_{temperature_k}K_v1.png"
+    tag = "" if flavor.name == "legacy" else f"_{flavor.output_tag}"
+    output_h5 = cache_dir / f"07_single_temperature_pdet_{temperature_k}K{tag}_v1.h5"
+    output_json = cache_dir / f"07_single_temperature_pdet{tag}_summary.json"
+    output_plot = cache_dir / "figures" / f"07_single_temperature_pdet_{temperature_k}K{tag}_v1.png"
     code_path = workspace / "src" / "single_temperature_pdet.py"
 
     stage04_csv = cache_dir / "04_intensity_error_scaling.csv"
@@ -255,7 +289,7 @@ def run_stage(
     stage05_npz = cache_dir / "05_amplitude_prior_v1.npz"
     stage05_json = cache_dir / "05_amplitude_prior_summary.json"
     stage03_noise = cache_dir / "03_noise_map_v1.h5"
-    stage06_json = cache_dir / "06_single_curve_recovery_summary.json"
+    stage06_json = cache_dir / f"06_single_curve_recovery{tag}_summary.json"
     for required in [stage04_csv, stage04_json, stage05_npz, stage05_json, stage03_noise, stage06_json]:
         if not required.exists():
             raise FileNotFoundError(required)
@@ -280,6 +314,7 @@ def run_stage(
     controlling_peak_threshold = np.zeros(shape, dtype=np.float64)
 
     rng = np.random.default_rng(seed)
+    delta_chi2_threshold_by_temperature = load_delta_chi2_thresholds(flavor)
     grid_summaries: dict[str, Any] = {}
     for tau_index, tau in enumerate(tau_grid):
         for amplitude_index, amplitude in enumerate(amplitude_grid):
@@ -293,6 +328,9 @@ def run_stage(
                     local_sigma=float(local_sigma),
                     image_sigma=float(image_sigma),
                     realizations=realizations,
+                    analysis_flavor=flavor.name,
+                    temperature_k=temperature_k,
+                    delta_chi2_threshold_by_temperature=delta_chi2_threshold_by_temperature,
                 )
                 p_det[tau_index, amplitude_index, sigma_index] = point["p_det"]
                 pass_count[tau_index, amplitude_index, sigma_index] = point["pass_count"]
@@ -342,6 +380,9 @@ def run_stage(
                     local_sigma=float(sigma_grid[sigma_index]),
                     image_sigma=float(image_sigma),
                     realizations=alt_realizations,
+                    analysis_flavor=flavor.name,
+                    temperature_k=temperature_k,
+                    delta_chi2_threshold_by_temperature=delta_chi2_threshold_by_temperature,
                 )
                 baseline = float(p_det[tau_index, amplitude_index, sigma_index])
                 alt_rows.append(
@@ -437,6 +478,7 @@ def run_stage(
     metadata = {
         "producing_stage": STAGE_ID,
         "produced_at": produced_at,
+        "analysis_flavor": flavor.name,
         "code_path": str(code_path.resolve()),
         "inputs": [
             str((workspace / "agents" / "06_single_curve_recovery.md").resolve()),
@@ -449,7 +491,7 @@ def run_stage(
             str(stage04_json.resolve()),
             str(stage05_npz.resolve()),
             str(stage05_json.resolve()),
-            str((root / "dipole.py").resolve()),
+            str((root / f"{flavor.dipole_module}.py").resolve()),
         ],
         "outputs": [
             str(output_h5.resolve()),
@@ -483,11 +525,16 @@ def run_stage(
         "amplitude_model": amplitude_metadata,
         "grid_metadata": grid_metadata,
         "cuts": {
-            "fit_model": "dipole.intensity_function(tph, coeff, tau)",
+            "analysis_flavor": flavor.name,
+            "fit_model": "dipole.intensity_function(tph, coeff, tau)"
+            if not flavor.fit_offset
+            else "dipole_new.intensity_function_offset(tph, coeff, tau, offset)",
             "fit_bounds": {"coeff": [0.0, "inf"], "tau_seconds": [1e-8, 1000.0]},
             "goodness_of_fit": "chi-square p_value > 0.05 with fixed local sigma",
             "mean_intensity_err_peak": "max(noisy intensities) >= 3 * local_sigma",
             "image_sigma_peak": "max(noisy intensities) >= 3 * representative image_sigma",
+            "minimal_amplitude_significance": "|fit_coeff| / sigma_fit_coeff >= 3 in minimal_caldet",
+            "minimal_delta_chi2": "calibrated Delta-chi2-vs-constant threshold by temperature in minimal_caldet",
             "tau_relative_error": "fit_tau_err / fit_tau <= 0.5",
         },
     }
@@ -600,6 +647,7 @@ def main() -> None:
     parser.add_argument("--alt-realizations", type=int, default=DEFAULT_ALT_REALIZATIONS)
     parser.add_argument("--seed", type=int, default=DEFAULT_SEED)
     parser.add_argument("--alt-seed", type=int, default=ALT_SEED)
+    parser.add_argument("--analysis-flavor", choices=["legacy", "minimal_caldet", "minimal"], default="legacy")
     args = parser.parse_args()
     summary = run_stage(
         root=args.root,
@@ -609,6 +657,7 @@ def main() -> None:
         alt_realizations=args.alt_realizations,
         seed=args.seed,
         alt_seed=args.alt_seed,
+        analysis_flavor=args.analysis_flavor,
     )
     print(
         json.dumps(

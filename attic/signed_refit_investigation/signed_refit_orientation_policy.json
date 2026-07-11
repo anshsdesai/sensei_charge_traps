@@ -1,0 +1,28 @@
+{
+  "labels": [
+    "no_significant_temperature",
+    "insufficient_significant_temperatures",
+    "single_orientation_positive",
+    "single_orientation_negative",
+    "ambiguous_sign_conflict",
+    "dual_response",
+    "structured_background_overlap"
+  ],
+  "metadata": {
+    "acceptance_pass": true,
+    "significance_rule": "temperature empirical profile p <= 0.001",
+    "single_trap_rule": "at least four significant temperatures and no accepted opposite-sign amplitude, with no shared pixel in the frozen persistent-horizontal morphology list",
+    "status": "FROZEN",
+    "step9_requirement": "recompute labels from the definitive accepted-temperature mask and apply the frozen horizontal-overlap classification",
+    "validation_path": "signed_refit_orientation_validation.npz",
+    "validation_sha256": "ca98e27569103373c2d8ba3fe15dba1931788d4777b87f19b93daebf513fcf6e",
+    "validation_version": "signed-refit-orientation-validation-v2"
+  },
+  "orientation_policy_version": "signed-refit-orientation-v2",
+  "policy": {
+    "dual_minimum_per_sign": 2,
+    "exclude_any_sign_conflict_from_single_trap": true,
+    "ignore_insignificant_temperatures": true,
+    "minimum_significant_temperatures": 4
+  }
+}

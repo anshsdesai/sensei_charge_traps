@@ -37,7 +37,7 @@ if __name__ == '__main__':
         type=float,
         default=300.0,
         help="Effective V1/V3 phase-overlap capture window in 15 MHz sequencer ticks. "
-             "Default 300 ticks = one V1/V3 hold in temp_scan_run1_imgseq.xml.",
+             "Default 300 ticks = one V1/V3 hold in daq/temp_scan_run1_imgseq.xml.",
     )
     parser.add_argument(
         '--trap-density-scale',

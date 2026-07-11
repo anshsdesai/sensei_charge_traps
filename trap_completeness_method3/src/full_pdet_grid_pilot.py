@@ -22,6 +22,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from dipole import intensity_function
+from dipole_new import intensity_function_offset
 from trap_completeness_method3.src.single_curve_recovery import (
     N_PUMPS,
     _as_builtin,
@@ -31,6 +32,7 @@ from trap_completeness_method3.src.single_curve_recovery import (
     _summary,
 )
 from trap_completeness_method3.src.single_temperature_pdet import CUT_LABELS
+from trap_completeness_method3.src.analysis_flavors import get_analysis_flavor, load_delta_chi2_thresholds
 
 
 STAGE_ID = "08_full_pdet_grid_pilot"
@@ -41,6 +43,7 @@ OUTPUT_H5_NAME = "08_pdet_grid_pilot_v1.h5"
 OUTPUT_JSON_NAME = "08_pdet_grid_pilot_summary.json"
 APRIL_ONLY_200K_MIN_RUNID = 160
 APRIL_ONLY_200K_MAX_RUNID = 184
+PEDESTAL_SOURCE_H5 = REPO_ROOT / "fit_dipole_spectra_minimal_caldet_err_4.h5"
 
 
 def _is_april_200k_source(source_fits: str) -> bool:
@@ -153,6 +156,51 @@ def _load_noise_lookup(path: Path) -> dict[int, dict[int, dict[str, Any]]]:
     return lookup
 
 
+def _load_pair_noise_lookup(path: Path) -> dict[int, dict[int, float]]:
+    with np.load(path) as data:
+        required = {"temperature_K", "quadrant", "sigma_base_e"}
+        missing = sorted(required.difference(data.files))
+        if missing:
+            raise KeyError(f"{path} is missing required pair-noise keys: {missing}")
+        temperatures = np.asarray(data["temperature_K"], dtype=np.int32)
+        quadrants = np.asarray(data["quadrant"], dtype=np.int16)
+        sigma_base = np.asarray(data["sigma_base_e"], dtype=np.float64)
+
+    finite = np.isfinite(sigma_base)
+    lookup: dict[int, dict[int, float]] = {}
+    for temperature, quadrant, sigma in zip(temperatures[finite], quadrants[finite], sigma_base[finite]):
+        lookup.setdefault(int(temperature), {})[int(quadrant)] = float(sigma)
+    return lookup
+
+
+def _load_pedestal_lookup(path: Path) -> dict[int, np.ndarray]:
+    offsets_by_temperature: dict[int, list[float]] = {}
+    with h5py.File(path, "r") as h5:
+        for quad_name in h5:
+            quad_group = h5[quad_name]
+            if not isinstance(quad_group, h5py.Group):
+                continue
+            for dp_name in quad_group:
+                dp_group = quad_group[dp_name]
+                if not isinstance(dp_group, h5py.Group):
+                    continue
+                for temp_name in dp_group:
+                    temp_group = dp_group[temp_name]
+                    if not isinstance(temp_group, h5py.Group) or "fit_offset" not in temp_group.attrs:
+                        continue
+                    match = re.fullmatch(r"temp_(\d+)", temp_name)
+                    if match is None:
+                        continue
+                    offset = float(temp_group.attrs["fit_offset"])
+                    if np.isfinite(offset):
+                        offsets_by_temperature.setdefault(int(match.group(1)), []).append(offset)
+    return {
+        temperature: np.asarray(offsets, dtype=np.float64)
+        for temperature, offsets in offsets_by_temperature.items()
+        if offsets
+    }
+
+
 def _load_stage07_grids(path: Path, stage05_npz: Path) -> tuple[np.ndarray, np.ndarray, dict[str, Any]]:
     if path.exists():
         with h5py.File(path, "r") as h5:
@@ -219,6 +267,19 @@ def _draw_intensity_err(
     return sigmas, exact_count, fallback_count, exact_by_delay_index, fallback_by_delay_index
 
 
+def _minimal_intensity_err(
+    true_intensity: np.ndarray,
+    temperature: int,
+    quadrant: int,
+    pair_noise_lookup: dict[int, dict[int, float]],
+) -> np.ndarray:
+    sigma_base = pair_noise_lookup.get(int(temperature), {}).get(int(quadrant))
+    if sigma_base is None:
+        raise ValueError(f"No minimal pair-noise sigma_base for {temperature} K quadrant {quadrant}")
+    # Use the injected truth, not the noisy realization, for the shot term by construction.
+    return np.sqrt(float(sigma_base) ** 2 + np.abs(true_intensity) / 4.0)
+
+
 def _simulate_grid_point(
     rng: np.random.Generator,
     seconds: np.ndarray,
@@ -229,9 +290,14 @@ def _simulate_grid_point(
     image_sigma_by_quadrant: np.ndarray,
     noise_lookup: dict[int, dict[int, dict[str, Any]]],
     realizations: int,
+    pair_noise_lookup: dict[int, dict[int, float]] | None = None,
+    pedestal_lookup: dict[int, np.ndarray] | None = None,
+    analysis_flavor: str = "legacy",
+    delta_chi2_threshold_by_temperature: dict[int, float] | None = None,
 ) -> dict[str, Any]:
+    flavor = get_analysis_flavor(analysis_flavor)
     coeff = amplitude / N_PUMPS
-    true_intensity = intensity_function(seconds, coeff, tau)
+    true_coeff = -coeff if flavor.fit_offset else coeff
     controlling_counter: Counter[str] = Counter()
     failed_cut_counter: Counter[str] = Counter()
     exact_noise_draw_count = 0
@@ -243,21 +309,48 @@ def _simulate_grid_point(
     for _ in range(realizations):
         quadrant = int(rng.choice(QUADRANTS))
         quadrant_counter[quadrant] += 1
-        intensity_err, exact_count, fallback_count, exact_index_counts, fallback_index_counts = _draw_intensity_err(
-            rng,
-            dtphs,
-            temperature,
-            quadrant,
-            noise_lookup,
-        )
-        exact_noise_draw_count += exact_count
-        fallback_noise_draw_count += fallback_count
-        exact_by_delay_index += exact_index_counts
-        fallback_by_delay_index += fallback_index_counts
+        if pedestal_lookup is None:
+            raise ValueError(f"{flavor.name} requires a pedestal lookup for offset injection.")
+        pedestal_pool = pedestal_lookup.get(int(temperature))
+        if pedestal_pool is None or pedestal_pool.size == 0:
+            raise ValueError(f"No measured fit_offset pedestal samples for {temperature} K")
+        true_offset = float(rng.choice(pedestal_pool))
+
+        true_intensity = intensity_function_offset(seconds, true_coeff, tau, true_offset)
+
+        if flavor.name == "legacy":
+            intensity_err, exact_count, fallback_count, exact_index_counts, fallback_index_counts = _draw_intensity_err(
+                rng,
+                dtphs,
+                temperature,
+                quadrant,
+                noise_lookup,
+            )
+            exact_noise_draw_count += exact_count
+            fallback_noise_draw_count += fallback_count
+            exact_by_delay_index += exact_index_counts
+            fallback_by_delay_index += fallback_index_counts
+        else:
+            if pair_noise_lookup is None:
+                raise ValueError(f"{flavor.name} requires minimal pair-noise lookup.")
+            intensity_err = _minimal_intensity_err(true_intensity, temperature, quadrant, pair_noise_lookup)
 
         noisy_intensity = true_intensity + rng.normal(0.0, intensity_err)
+        if flavor.name == "legacy":
+            # Legacy spectra were built with getDipoleSpectra2(..., absolute=True);
+            # rectify the signed truth-plus-noise values, not the error bars.
+            noisy_intensity = np.abs(noisy_intensity)
         image_sigma = float(image_sigma_by_quadrant[quadrant])
-        fit = _fit_one_curve(seconds, noisy_intensity, intensity_err, image_sigma)
+        fit = _fit_one_curve(
+            seconds,
+            noisy_intensity,
+            intensity_err,
+            image_sigma,
+            analysis_flavor=flavor.name,
+            temperature_k=temperature,
+            delta_chi2_threshold_by_temperature=delta_chi2_threshold_by_temperature,
+            _flavor=flavor,
+        )
         controlling = str(fit["controlling_failure_cut"] or "fit_failed")
         controlling_counter[controlling] += 1
         if fit["failed_cuts"]:
@@ -350,15 +443,20 @@ def _write_hdf5(path: Path, payload: dict[str, Any]) -> None:
             diagnostics.create_dataset(key, data=payload[key])
 
 
-def run_stage(root: Path, realizations: int, seed: int) -> dict[str, Any]:
+def run_stage(root: Path, realizations: int, seed: int, analysis_flavor: str = "legacy") -> dict[str, Any]:
+    flavor = get_analysis_flavor(analysis_flavor)
     workspace = root / "trap_completeness_method3"
     cache_dir = workspace / "cache"
     cache_dir.mkdir(parents=True, exist_ok=True)
 
     started = time.perf_counter()
     produced_at = datetime.now().astimezone().isoformat(timespec="seconds")
-    output_h5 = cache_dir / OUTPUT_H5_NAME
-    output_json = cache_dir / OUTPUT_JSON_NAME
+    if flavor.name == "legacy":
+        output_h5 = cache_dir / OUTPUT_H5_NAME
+        output_json = cache_dir / OUTPUT_JSON_NAME
+    else:
+        output_h5 = cache_dir / f"08_pdet_grid_pilot_{flavor.output_tag}_v1.h5"
+        output_json = cache_dir / f"08_pdet_grid_pilot_{flavor.output_tag}_summary.json"
     code_path = workspace / "src" / "full_pdet_grid_pilot.py"
 
     stage03_noise = cache_dir / "03_noise_map_v1.h5"
@@ -366,14 +464,18 @@ def run_stage(root: Path, realizations: int, seed: int) -> dict[str, Any]:
     stage04_json = cache_dir / "04_intensity_error_scaling.json"
     stage05_npz = cache_dir / "05_amplitude_prior_v1.npz"
     stage05_json = cache_dir / "05_amplitude_prior_summary.json"
-    stage07_h5 = cache_dir / "07_single_temperature_pdet_160K_v1.h5"
-    stage07_json = cache_dir / "07_single_temperature_pdet_summary.json"
+    tag = "" if flavor.name == "legacy" else f"_{flavor.output_tag}"
+    stage07_h5 = cache_dir / f"07_single_temperature_pdet_160K{tag}_v1.h5"
+    stage07_json = cache_dir / f"07_single_temperature_pdet{tag}_summary.json"
     for required in [stage03_noise, stage04_csv, stage04_json, stage05_npz, stage05_json, stage07_h5, stage07_json]:
         if not required.exists():
             raise FileNotFoundError(required)
 
     temperature_grids = _load_all_stage04_grids(stage04_csv)
     noise_lookup = _load_noise_lookup(stage03_noise)
+    pair_noise_lookup = _load_pair_noise_lookup(root / "pair_noise_table_minimal.npz") if flavor.name != "legacy" else None
+    pedestal_lookup = _load_pedestal_lookup(PEDESTAL_SOURCE_H5)
+    delta_chi2_threshold_by_temperature = load_delta_chi2_thresholds(flavor)
     tau_grid, amplitude_grid, stage07_grid_metadata = _load_stage07_grids(stage07_h5, stage05_npz)
     padded = _pad_temperature_grids(temperature_grids)
     temperatures = padded["temperature_K"]
@@ -409,6 +511,10 @@ def run_stage(root: Path, realizations: int, seed: int) -> dict[str, Any]:
                     image_sigma_by_quadrant=image_sigma_by_quadrant,
                     noise_lookup=noise_lookup,
                     realizations=realizations,
+                    pair_noise_lookup=pair_noise_lookup,
+                    pedestal_lookup=pedestal_lookup,
+                    analysis_flavor=flavor.name,
+                    delta_chi2_threshold_by_temperature=delta_chi2_threshold_by_temperature,
                 )
                 p_det[temp_index, tau_index, amplitude_index] = point["p_det"]
                 p_det_binomial_sigma[temp_index, tau_index, amplitude_index] = point["p_det_binomial_sigma"]
@@ -452,6 +558,13 @@ def run_stage(root: Path, realizations: int, seed: int) -> dict[str, Any]:
     bright_reachable_mask = peak_reachable_mask & (np.arange(amplitude_grid.size)[None, None, :] == amplitude_grid.size - 1)
     warm_long_mask = warm_mask[:, None, None] & long_tau_mask[None, :, None] & bright_amp_mask[None, None, :]
 
+    flavor_noise_check = (
+        np.all(total_noise_draw_count_by_temperature > 0)
+        if flavor.name == "legacy"
+        else pair_noise_lookup is not None and all(
+            int(t) in pair_noise_lookup for t in temperatures
+        )
+    )
     required_checks = {
         "all_23_measurement_temperatures_have_detection_grid": "PASS" if temperatures.size == 23 else "FAIL",
         "each_temperature_uses_stage04_seconds_dtph_grid_with_documented_200k_april_selection": "PASS"
@@ -459,9 +572,7 @@ def run_stage(root: Path, realizations: int, seed: int) -> dict[str, Any]:
         else "FAIL",
         "primary_grid_has_no_explicit_sigma_axis": "PASS" if p_det.ndim == 3 else "FAIL",
         "controlling_cutflow_fractions_sum_to_one": "PASS" if np.allclose(controlling_fraction_sums, 1.0) else "FAIL",
-        "exact_and_fallback_noise_draw_counts_stored_by_temperature": "PASS"
-        if np.all(total_noise_draw_count_by_temperature > 0)
-        else "FAIL",
+        "flavor_specific_noise_model_available": "PASS" if flavor_noise_check else "FAIL",
         "warm_long_tau_behavior_inspected": "PASS" if np.any(warm_long_mask) else "FAIL",
         "bright_peak_reachable_region_reaches_high_p_det_somewhere": "PASS"
         if np.any(bright_reachable_mask) and float(np.nanmax(p_det[bright_reachable_mask])) >= 0.75
@@ -477,7 +588,7 @@ def run_stage(root: Path, realizations: int, seed: int) -> dict[str, Any]:
         "all_temperatures_have_trustworthy_seconds_grid_and_noise_model": "PASS"
         if (
             required_checks["all_23_measurement_temperatures_have_detection_grid"] == "PASS"
-            and required_checks["exact_and_fallback_noise_draw_counts_stored_by_temperature"] == "PASS"
+            and required_checks["flavor_specific_noise_model_available"] == "PASS"
         )
         else "FAIL",
         "pilot_runtime_memory_summary_recorded_before_dense_grid": "PASS",
@@ -501,6 +612,7 @@ def run_stage(root: Path, realizations: int, seed: int) -> dict[str, Any]:
     metadata = {
         "producing_stage": STAGE_ID,
         "produced_at": produced_at,
+        "analysis_flavor": flavor.name,
         "code_path": str(code_path.resolve()),
         "inputs": [
             str((workspace / "agents" / "03_trap_free_noise_map.md").resolve()),
@@ -514,7 +626,9 @@ def run_stage(root: Path, realizations: int, seed: int) -> dict[str, Any]:
             str(stage05_json.resolve()),
             str(stage07_h5.resolve()),
             str(stage07_json.resolve()),
-            str((root / "dipole.py").resolve()),
+            str(PEDESTAL_SOURCE_H5.resolve()),
+            *([str((root / "pair_noise_table_minimal.npz").resolve())] if flavor.name != "legacy" else []),
+            str((root / f"{flavor.dipole_module}.py").resolve()),
         ],
         "outputs": [str(output_h5.resolve()), str(output_json.resolve())],
         "random_seed": seed,
@@ -522,7 +636,21 @@ def run_stage(root: Path, realizations: int, seed: int) -> dict[str, Any]:
         "model_choice": {
             "primary_artifact": "Marginalized p_det(tau, A, T) with no explicit sigma axis.",
             "quadrant_marginalization": "Each realization draws one quadrant uniformly from 0,1,2,3; that quadrant controls image_sigma and local noise pools.",
-            "local_noise": "For each synthetic intensity point, draw sigma from Stage 03 exact (T, quadrant, dtph) trap-free samples when available; otherwise fall back to (T, quadrant).",
+            "local_noise": (
+                "Legacy: for each synthetic intensity point, draw sigma from Stage 03 exact (T, quadrant, dtph) trap-free samples when available; otherwise fall back to (T, quadrant)."
+                if flavor.name == "legacy"
+                else "Minimal: use sigma_point = sqrt(sigma_base(T, quadrant)^2 + abs(true injected intensity)/4) from pair_noise_table_minimal.npz."
+            ),
+            "pedestal_injection": (
+                "Per-realization true_offset is injected into the legacy truth from measured fit_offset attributes in the minimal ngood4 HDF5 catalog for the same temperature; the legacy fit remains offset-free."
+                if not flavor.fit_offset
+                else "Per-realization true_offset is drawn from measured fit_offset attributes in the minimal ngood4 HDF5 catalog for the same temperature."
+            ),
+            "intensity_convention": (
+                "Legacy rectifies noisy intensity values with abs(), matching getDipoleSpectra2(..., absolute=True); intensity_err is unchanged."
+                if flavor.name == "legacy"
+                else "Minimal keeps signed noisy intensity values, matching getDipoleSpectra2(..., absolute=False)."
+            ),
             "temperature_200_selection": "Use April 2-4 200 K source files only. The current upstream HDF5 is not regenerated; repeated low-dtph 200 K Stage 04 rows are collapsed to one per dtph, and Stage 03 200 K noise samples are filtered to CCD2 run IDs 160-184.",
             "image_sigma_caveat": "Stage 04 representative image_sigma thresholds are still read from the current upstream HDF5-derived summary because upstream HDF5 was not regenerated.",
             "amplitude_axis": "A is the true curve amplitude in electrons at the measurement temperature.",
@@ -549,11 +677,16 @@ def run_stage(root: Path, realizations: int, seed: int) -> dict[str, Any]:
             **stage07_grid_metadata,
         },
         "cuts": {
-            "fit_model": "dipole.intensity_function(tph, coeff, tau)",
+            "analysis_flavor": flavor.name,
+            "fit_model": "dipole.intensity_function(tph, coeff, tau)"
+            if not flavor.fit_offset
+            else "dipole_new.intensity_function_offset(tph, coeff, tau, offset)",
             "fit_bounds": {"coeff": [0.0, "inf"], "tau_seconds": [1e-8, 1000.0]},
             "goodness_of_fit": "chi-square p_value > 0.05 with per-point local sigma draws",
             "mean_intensity_err_peak": "max(noisy intensities) >= 3 * mean(intensity_err)",
             "image_sigma_peak": "max(noisy intensities) >= 3 * Stage 04 median image_sigma for the drawn temperature/quadrant",
+            "minimal_amplitude_significance": "|fit_coeff| / sigma_fit_coeff >= 3 in minimal_caldet",
+            "minimal_delta_chi2": "calibrated Delta-chi2-vs-constant threshold by temperature in minimal_caldet",
             "tau_relative_error": "fit_tau_err / fit_tau <= 0.5",
         },
     }
@@ -635,8 +768,9 @@ def main() -> None:
     parser.add_argument("--root", type=Path, default=REPO_ROOT)
     parser.add_argument("--realizations", type=int, default=DEFAULT_REALIZATIONS)
     parser.add_argument("--seed", type=int, default=DEFAULT_SEED)
+    parser.add_argument("--analysis-flavor", choices=["legacy", "minimal_caldet", "minimal"], default="legacy")
     args = parser.parse_args()
-    summary = run_stage(root=args.root, realizations=args.realizations, seed=args.seed)
+    summary = run_stage(root=args.root, realizations=args.realizations, seed=args.seed, analysis_flavor=args.analysis_flavor)
     print(
         json.dumps(
             _as_builtin(

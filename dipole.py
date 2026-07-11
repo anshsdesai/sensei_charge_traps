@@ -439,6 +439,78 @@ def log_energy_cross_section(temperatures,E,logsigma):
     return logtaus
 
 
+def fit_energy_cross_section(good_temperatures, good_taus, good_tau_errs,
+                             wellBehavedThreshold):
+    from scipy.optimize import curve_fit
+    from scipy.stats import chi2
+    logtaus = np.log(good_taus)
+    logtauerr = good_tau_errs / good_taus
+
+    result = {
+        'WellBehavedTrap': True if len(good_temperatures) >= wellBehavedThreshold else False,
+        'EnergyFitFailed': None,
+        'GoodEnergyFit': None,
+        'popt': None,
+        'perr': None,
+        'pcov': None,
+        'chi_squared': None,
+        'reduced_chi_squared': None,
+        'p_value': None,
+        'r2': None,
+    }
+
+    if result['WellBehavedTrap']:
+        try:
+            popt, pcov = curve_fit(log_energy_cross_section, good_temperatures, logtaus,sigma=logtauerr,bounds=([0,-100],[2,-1]))
+            perr = np.sqrt(np.diag(pcov))
+            result['EnergyFitFailed'] = False
+        except:
+            result['EnergyFitFailed'] = True
+            return result
+        log_tau_fit = log_energy_cross_section(good_temperatures, *popt)
+        residuals = np.log(good_taus) - log_tau_fit
+
+        chi_squared = np.sum((residuals / logtauerr)**2)
+        dof = len(good_taus) - len(popt)
+        reduced_chi_squared = chi_squared/dof
+        # p_value = 1 - chi2.cdf(chi_squared, dof)
+        p_value = chi2.sf(chi_squared, dof)
+
+        # p_value = 1 - chi2.cdf(chi_squared, dof)
+        ss_res = np.sum((residuals) ** 2)
+
+        ss_tot = np.sum((np.log(good_taus)- np.mean(np.log(good_taus))) ** 2)
+        r2 = 1 - (ss_res / ss_tot)
+
+        
+        
+        goodness_of_fit =  p_value > 0.05
+        
+
+        rtol = 0.25
+
+        goodness_of_fit = (r2 < 1 + rtol) & (r2 > 1 - rtol)
+
+        goodness_of_fit = reduced_chi_squared < 5
+        #energy boundary
+        if popt[0] <= 1e-5 or popt[0] > 10:
+            goodness_of_fit = False
+
+        if popt[1] == -100 or popt[1] == -1:
+            goodness_of_fit = False
+
+        result['GoodEnergyFit'] = True if goodness_of_fit else False
+        result['popt'] = popt
+        result['perr'] = perr
+        result['pcov'] = pcov
+        result['chi_squared'] = chi_squared
+        result['reduced_chi_squared'] = reduced_chi_squared
+        result['p_value'] = p_value
+        result['r2'] = r2
+
+    return result
+
+
 
 
 def constant_fit_r2(y, y_err=None):
@@ -581,56 +653,32 @@ def fitTrapIntensity(full_dipole_dict,useIntensityErr=True,wellBehavedThreshold=
             good_temperatures=np.array(good_temperatures)
             good_taus=np.array(good_taus)
             good_tau_errs=np.array(good_tau_errs)
-            logtaus = np.log(good_taus)
-            logtauerr = good_tau_errs / good_taus
-
+            energy_fit = fit_energy_cross_section(
+                good_temperatures,
+                good_taus,
+                good_tau_errs,
+                wellBehavedThreshold,
+            )
             
-            dipole_dict[dp]['WellBehavedTrap'] = True if len(good_temperatures) >= wellBehavedThreshold else False
+            dipole_dict[dp]['WellBehavedTrap'] = energy_fit['WellBehavedTrap']
 
             if dipole_dict[dp]['WellBehavedTrap']:
-                try:
-                    popt, pcov = curve_fit(log_energy_cross_section, good_temperatures, logtaus,sigma=logtauerr,bounds=([0,-100],[2,-1]))
-                    perr = np.sqrt(np.diag(pcov))
-                    dipole_dict[dp]['EnergyFitFailed'] = False
-                except:
+                if energy_fit['EnergyFitFailed']:
                     dipole_dict[dp]['EnergyFitFailed'] = True
                     
                     continue
-                log_tau_fit = log_energy_cross_section(good_temperatures, *popt)
-                residuals = np.log(good_taus) - log_tau_fit
-
-                chi_squared = np.sum((residuals / logtauerr)**2)
-                dof = len(good_taus) - len(popt)
-                reduced_chi_squared = chi_squared/dof
-                # p_value = 1 - chi2.cdf(chi_squared, dof)
-                p_value = chi2.sf(chi_squared, dof)
-
-                # p_value = 1 - chi2.cdf(chi_squared, dof)
-                ss_res = np.sum((residuals) ** 2)
-
-                ss_tot = np.sum((np.log(good_taus)- np.mean(np.log(good_taus))) ** 2)
-                r2 = 1 - (ss_res / ss_tot)
-
-                
-                
-                goodness_of_fit =  p_value > 0.05
-                
-
-                rtol = 0.25
-
-                goodness_of_fit = (r2 < 1 + rtol) & (r2 > 1 - rtol)
-
-                goodness_of_fit = reduced_chi_squared < 5
-                #energy boundary
-                if popt[0] <= 1e-5 or popt[0] > 10:
-                    goodness_of_fit = False
-
-                if popt[1] == -100 or popt[1] == -1:
-                    goodness_of_fit = False
+                popt = energy_fit['popt']
+                perr = energy_fit['perr']
+                pcov = energy_fit['pcov']
+                chi_squared = energy_fit['chi_squared']
+                reduced_chi_squared = energy_fit['reduced_chi_squared']
+                p_value = energy_fit['p_value']
+                r2 = energy_fit['r2']
+                dipole_dict[dp]['EnergyFitFailed'] = False
                 
 
 
-                dipole_dict[dp]['GoodEnergyFit'] = True if goodness_of_fit else False
+                dipole_dict[dp]['GoodEnergyFit'] = energy_fit['GoodEnergyFit']
                 # if dipole_dict[dp]['GoodEnergyFit']:
                 dipole_dict[dp]['energy_BestFitEnergy'] = popt[0]
                 dipole_dict[dp]['energy_BestFitEnergyErr'] = perr[0]

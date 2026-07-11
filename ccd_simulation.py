@@ -1049,8 +1049,8 @@ class CCD:
         self.unmasked_pixels = []
         self.unmasked_pixels_no_traps = []
 
-        # temp_scan_run1_clearseq.xml at the 15 MHz sequencer clock.
-        self.clear_sequence = 'temp_scan_run1_clearseq.xml'
+        # daq/temp_scan_run1_clearseq.xml at the 15 MHz sequencer clock.
+        self.clear_sequence = 'daq/temp_scan_run1_clearseq.xml'
         self.clear_clock_hz = 15e6
         self.trap_transport_model = TRAP_TRANSPORT_MODEL
         self.phase_capture_ticks = float(phase_capture_ticks)

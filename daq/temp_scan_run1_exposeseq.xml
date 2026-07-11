@@ -1,0 +1,187 @@
+<!--
+sequencer for LTA v2 with firmware v2.x
+clock mapping and dimensions for C-module (SENSEI science CCD with long serial register)
+long delays for RC-filtered H and V clocks
+
+Reads a whole CCD through all four amplifiers.
+Clear the active area, expose, read.
+Serial register is cleared after each row.
+Four-state (no-reset) skipper cycle.
+Floating gate is not reset during readout.
+Binning and skipping (cropping) are configurable.
+-->
+
+<variables>
+    <!--
+        Upper-case clock names correspond to hardware pin names.
+        The mapping from upper-case clock names to bitmasks is set in the firmware.
+        Do not change this section!
+        If you need to remap clocks, do it in the section after this one.
+    -->
+    <state name="V1A" val="00000000000000000000000000000001"/>
+    <state name="V1B" val="00000000000000000000000000000010"/>
+    <state name="V2C" val="00000000000000000000000000000100"/>
+    <state name="V3A" val="00000000000000000000000000001000"/>
+    <state name="V3B" val="00000000000000000000000000010000"/>
+    <state name="H1A" val="00000000000000000000000000100000"/>
+    <state name="H1B" val="00000000000000000000000001000000"/>
+    <state name="H2C" val="00000000000000000000000010000000"/>
+    <state name="H3A" val="00000000000000000000000100000000"/>
+    <state name="H3B" val="00000000000000000000001000000000"/>
+    <state name="SWA" val="00000000000000000000010000000000"/>
+    <state name="SWB" val="00000000000000000000100000000000"/>
+    <state name="RGA" val="00000000000000000001000000000000"/>
+    <state name="RGB" val="00000000000000000010000000000000"/>
+    <state name="OGA" val="00000000000000000100000000000000"/>
+    <state name="OGB" val="00000000000000001000000000000000"/>
+    <state name="DGA" val="00000000000000010000000000000000"/>
+    <state name="DGB" val="00000000000000100000000000000000"/>
+    <state name="TGA" val="00000000000001000000000000000000"/>
+    <state name="TGB" val="00000000000010000000000000000000"/>
+    <state name="PED" val="00000010000000000000000000000000"/>
+    <state name="SIG" val="00000100000000000000000000000000"/>
+    <!--
+        Lower-case clock names correspond to the role the clock plays in the sequencer.
+        The mapping between upper-case and lower-case clock names is set by the adapters, cables, and CCD layout.
+    -->
+    <state name="v1a" val="V1A"/>
+    <state name="v1b" val="V3B"/>
+    <state name="v2c" val="V2C"/>
+    <state name="v3a" val="V3A"/>
+    <state name="v3b" val="V1B"/>
+    <state name="h1a" val="H3A"/>
+    <state name="h1b" val="H1B"/>
+    <state name="h2c" val="H2C"/>
+    <state name="h3a" val="H1A"/>
+    <state name="h3b" val="H3B"/>
+
+    <state name="STATE_3DG"  val="v1a | v1b |       v3a | v3b | TGA | TGB | h1a | h1b |                   SWA | SWB | OGA | OGB | RGA | RGB                        "/>
+    <state name="STATE_3"    val="v1a | v1b |       v3a | v3b | TGA | TGB | h1a | h1b |                               OGA | OGB | RGA | RGB | DGA | DGB            "/>
+    <state name="STATE_4"    val="v1a | v1b |       v3a | v3b | TGA | TGB | h1a | h1b | h2c |                         OGA | OGB | RGA | RGB | DGA | DGB            "/>
+    <state name="STATE_5"    val="v1a | v1b |       v3a | v3b | TGA | TGB |             h2c |                         OGA | OGB | RGA | RGB | DGA | DGB            "/>
+    <state name="STATE_6"    val="v1a | v1b |       v3a | v3b | TGA | TGB |             h2c | h3a | h3b |             OGA | OGB | RGA | RGB | DGA | DGB            "/>
+    <state name="STATE_7"    val="v1a | v1b |       v3a | v3b | TGA | TGB |                   h3a | h3b |             OGA | OGB | RGA | RGB | DGA | DGB            "/>
+    <state name="STATE_8"    val="v1a | v1b |       v3a | v3b | TGA | TGB | h1a | h1b |       h3a | h3b |             OGA | OGB | RGA | RGB | DGA | DGB            "/>
+    <state name="STATE_8DG"  val="v1a | v1b |       v3a | v3b | TGA | TGB | h1a | h1b |       h3a | h3b | SWA | SWB | OGA | OGB | RGA | RGB                        "/>
+    <state name="STATE_9"    val="v1a | v1b |       v3a | v3b | TGA | TGB | h1a | h1b |       h3a | h3b | SWA | SWB | OGA | OGB | RGA | RGB | DGA | DGB            "/>
+    <state name="STATE_10"   val="v1a | v1b |       v3a | v3b | TGA | TGB | h1a | h1b |       h3a | h3b |             OGA | OGB | RGA | RGB | DGA | DGB            "/>
+    <state name="STATE_10RG" val="v1a | v1b |       v3a | v3b | TGA | TGB | h1a | h1b |       h3a | h3b |             OGA | OGB |             DGA | DGB            "/>
+    <state name="STATE_10OG" val="v1a | v1b |       v3a | v3b | TGA | TGB | h1a | h1b |       h3a | h3b |                         RGA | RGB | DGA | DGB            "/>
+
+    <state name="STATE_11"   val="v1a | v1b |       v3a | v3b |             h1a | h1b |       h3a | h3b |             OGA | OGB | RGA | RGB | DGA | DGB            "/>
+    <state name="STATE_12"   val="v1a | v1b |                               h1a | h1b |       h3a | h3b |             OGA | OGB | RGA | RGB | DGA | DGB            "/>
+    <state name="STATE_13"   val="v1a | v1b | v2c |                         h1a | h1b |       h3a | h3b |             OGA | OGB | RGA | RGB | DGA | DGB            "/>
+    <state name="STATE_14"   val="            v2c |                         h1a | h1b |       h3a | h3b |             OGA | OGB | RGA | RGB | DGA | DGB            "/>
+    <state name="STATE_15"   val="            v2c | v3a | v3b |             h1a | h1b |       h3a | h3b |             OGA | OGB | RGA | RGB | DGA | DGB            "/>
+    <state name="STATE_16"   val="                  v3a | v3b | TGA | TGB | h1a | h1b |       h3a | h3b |             OGA | OGB | RGA | RGB | DGA | DGB            "/>
+
+    <state name="STATE_8B"   val="v1a | v1b |       v3a | v3b | TGA | TGB | h1a | h1b |       h3a | h3b |             OGA | OGB | RGA | RGB | DGA | DGB | PED      "/>
+
+    <state name="STATE_10A"  val="v1a | v1b |       v3a | v3b | TGA | TGB | h1a | h1b |       h3a | h3b |             OGA | OGB | RGA | RGB | DGA | DGB |       SIG"/>
+
+    <var name="NROW" val="600"/>
+    <var name="NCOL" val="4000"/>
+
+    <var name="NSAMP" val="400"/>
+
+    <var name="NBINROW" val="1"/>
+    <var name="NBINCOL" val="1"/>
+
+    <var name="SKIPROW" val="0"/>
+    <var name="SKIPCOL" val="0"/>
+
+    <var name="CCDNPRES" val="7"/>
+    <var name="CCDNROW" val="1024"/>
+    <var name="CCDNCOL" val="6144"/>
+
+    <var name="EXPOSURE" val="0"/>
+    <var name="TOG_VDD" val="1"/>
+    <var name="TOG_VR" val="0"/>
+
+    <var name="delay_V_Overlap"           val="600"/>
+    <var name="delay_H_overlap"           val="300"/>
+    <var name="delay_Integ_ped"           val="270"/><!--video signal needs extra settling time in the pedestal integration-->
+    <var name="delay_Integ_sig"           val="245"/>
+    <var name="delay_SWhigh"              val="12"/>
+    <var name="delay_og_low"              val="5"/>
+    <var name="delay_dg_low"              val="15"/>
+    <var name="delay_RG_Width"            val="15"/>
+    <var name="delay_expose"              val="15000000"/><!--one second-->
+
+</variables>
+
+<dynamicVariables/>
+
+<recipes>
+    <recipe name="hold">
+        <step state="STATE_8"    delay="delay_H_overlap"/>
+    </recipe>
+    <recipe name="expose">
+        <step state="STATE_16"   delay="delay_expose"/>
+    </recipe>
+    <recipe name="vertical">
+        <step state="STATE_11"   delay="delay_V_Overlap"/>
+        <step state="STATE_12"   delay="delay_V_Overlap"/>
+        <step state="STATE_13"   delay="delay_V_Overlap"/>
+        <step state="STATE_14"   delay="delay_V_Overlap"/>
+        <step state="STATE_15"   delay="delay_V_Overlap"/>
+        <step state="STATE_16"   delay="delay_V_Overlap"/>
+    </recipe>
+    <recipe name="horizontal_step">
+        <step state="STATE_8DG"  delay="delay_dg_low"/>
+        <step state="STATE_3"    delay="delay_H_overlap"/>
+        <step state="STATE_4"    delay="delay_H_overlap"/>
+        <step state="STATE_5"    delay="delay_H_overlap"/>
+        <step state="STATE_6"    delay="delay_H_overlap"/>
+        <step state="STATE_7"    delay="delay_H_overlap"/>
+        <step state="STATE_8"    delay="delay_H_overlap"/>
+        <step state="STATE_10RG" delay="delay_RG_Width"/>
+    </recipe>
+    <recipe name="horizontal_step_noR">
+        <step state="STATE_8DG"  delay="delay_dg_low"/>
+        <step state="STATE_3"    delay="delay_H_overlap"/>
+        <step state="STATE_4"    delay="delay_H_overlap"/>
+        <step state="STATE_5"    delay="delay_H_overlap"/>
+        <step state="STATE_6"    delay="delay_H_overlap"/>
+        <step state="STATE_7"    delay="delay_H_overlap"/>
+        <step state="STATE_8"    delay="delay_H_overlap"/>
+    </recipe>
+    <recipe name="drain">
+        <step state="STATE_8DG"  delay="delay_dg_low"/>
+    </recipe>
+    <recipe name="horizontal">
+        <step state="STATE_3"    delay="delay_H_overlap"/>
+        <step state="STATE_4"    delay="delay_H_overlap"/>
+        <step state="STATE_5"    delay="delay_H_overlap"/>
+        <step state="STATE_6"    delay="delay_H_overlap"/>
+        <step state="STATE_7"    delay="delay_H_overlap"/>
+        <step state="STATE_8"    delay="delay_H_overlap"/>
+    </recipe>
+    <recipe name="skipper">
+        <step state="STATE_8B"   delay="delay_Integ_ped"/>
+        <step state="STATE_9"    delay="delay_SWhigh"/>
+        <step state="STATE_10A"  delay="delay_Integ_sig"/>
+        <step state="STATE_10OG" delay="delay_og_low"/>
+    </recipe>
+</recipes>
+
+<sequence>
+    <recipe name="vertical" n="1000">
+        <recipe name="horizontal_step" n="10"/>
+    </recipe>
+    <recipe name="vertical" n="10">
+        <recipe name="horizontal_step" n="3500"/>
+    </recipe>
+    <recipe name="expose" n="EXPOSURE"/>
+    <recipe name="vertical" n="SKIPROW"/>
+    <recipe name="horizontal_step" n="10000"/>
+    <recipe name="hold" n="NROW">
+        <recipe name="drain" n="NCOL">
+            <recipe name="horizontal" n="NBINCOL"/>
+            <recipe name="skipper" n="NSAMP"/>
+        </recipe>
+        <recipe name="horizontal_step_noR" n="5000"/>
+        <recipe name="vertical" n="NBINROW"/>
+        <recipe name="horizontal_step_noR" n="SKIPCOL"/>
+    </recipe>
+</sequence>
