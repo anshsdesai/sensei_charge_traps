@@ -88,6 +88,20 @@ published exposure-dependent band:
 
 Baseline (characterized-only) simulation results are unaffected.
 
+**How robust is D3 to the poorly constrained cross-sections?** (Raised by Ansh
+2026-07-10; per-trap fitted σ is noise-dominated — the pairs file spans
+6.8×10⁻²⁶–5.2×10⁻¹² cm², 14 decades, because σ is ~99.7% degenerate with E.)
+Three layers: (i) the 0.76 detectability is a statement about the population
+*as simulated* — the sim literally runs the fitted pairs, so it holds
+regardless of whether fitted σ equals true σ; (ii) fit noise moves a trap
+along its constant-τ₁₃₅ line, and the probe already averaged over the full
+14-decade fitted scatter — per-bin P stayed 0.5–0.96 because even the smallest
+fitted candidates (~10⁻¹⁹ cm²) imply E ≈ 0.36–0.40 eV, at or above the
+detectability edge; flipping the conclusion requires *true* tail σ ≥2 orders
+below the smallest fitted values; (iii) that possibility is not dismissed — it
+is exactly the "tiny-σ branch," which the plan brackets with the domain UL
+(§4.1) and the required inertness run (§4.5) instead of assuming it away.
+
 ---
 
 ## 2. The replacement estimator
@@ -162,11 +176,11 @@ bounded by the domain UL (§4) — e.g. ~190 allowed in the driver band against
 an HT point estimate of 34, a genuine ~6× allowance, not clones; (2) hidden-
 because-faint, model-following traps are covered by the faint-prior variant
 grids (§4.4); (3) hidden-because-invisible (tiny σ) traps are unbounded in
-*number* but bounded in *effect*: the same σ that hides them from pumping caps
-their capture during operation (capture ∝ σ, unsaturated in the
-phase-limited kernel) — closed by the inertness run (§4.5). HT does not claim
-blind-corner traps don't exist; it refuses to count them and hands them to
-layers (2)–(3).
+*number*; their *effect* is expected suppressed because capture is ∝ σ in the
+transfer windows (exact for single-e packets within the shipped model), but
+large-packet filling saturates and only the **required** inertness run (§4.5)
+turns "suppressed" into a number. HT does not claim blind-corner traps don't
+exist; it refuses to count them and hands them to layers (2)–(3).
 
 ### 2.3 Measured result on the current catalog (probe 3)
 
@@ -242,11 +256,36 @@ layers (2)–(3).
    (and `_faint0p25_`), then recompute weights and ε_D from them. Reported as
    stated conditional variants (as the paper already does), expected driver
    band ≈ 300–1,800.
-5. **Beyond-domain closure (optional but recommended)**: one campaign scenario
-   seeding the σ < domain population *with its detection-consistent tiny σ*
-   (capture α scales ∝ σ) to demonstrate inertness — converts the unbounded
-   corner into a bounded sentence: "traps hidden from pumping by small σ are
-   correspondingly inactive during operation."
+5. **Beyond-domain closure (REQUIRED, not optional)**: one campaign scenario
+   seeding the σ-below-domain population *with its detection-consistent tiny σ*
+   to measure — not assume — how suppressed it is. The suppression argument
+   has a precise scope (established 2026-07-10 after Ansh challenged it):
+   - *Exact within the shipped transport model*: exposure-phase capture is
+     zero by phase geometry — `charge_trap_interaction`
+     (`ccd_simulation.py:1292-1314`) is emission-only because exposure charge
+     parks under V2 while measured traps are V1/V3. All capture happens in
+     transfer windows with per-crossing probability 1−e^(−q·α), α =
+     σ·v_th·t_dwell/V_packet ∝ σ. For single-e packets (q ≈ 1) suppression is
+     therefore *linear* in σ.
+   - *Sub-linear for large packets*: a q ~ 10³ event packet has q·α ≥ 1 down
+     to σ ~ 10⁻¹⁸ cm², so event/bleed-driven filling saturates and only
+     suppresses fully for yet smaller σ. Whether the tail's
+     exposure-dependent slope survives at tiny σ is a quantitative question —
+     hence this run is required before any "inert" wording reaches the paper.
+   - *Model-scope caveat*: none of this covers hypothetical **V2 traps**
+     (parked under the collection phase for the whole exposure). They are
+     invisible to pumping for phase-geometry reasons regardless of σ or τ,
+     are excluded from the transport model by design
+     (`ccd_simulation.py:1225-1227`), and were equally outside the old
+     correction's scope ("makes no statement about traps that do not follow
+     our model"). This stays a stated domain limitation, unchanged.
+6. **(E, σ) rendering of the completeness map**: produce the stage-09 grid,
+   catalog dots, and the UL domain boundary re-plotted in (E, log σ) axes via
+   the exact affine relabeling log σ = `log_energy_cross_section`(135, E, 0) −
+   ln τ₁₃₅. Identical information to the (τ, E) map, but the blind region
+   becomes "below a boundary curve σ_min(E)", which makes *where the
+   efficiency is bounded* — and hence the §7 domain decision — directly
+   legible. Figure feeds the notebook and possibly the paper.
 
 ## 5. Stage 11c — validation (acceptance criteria)
 
@@ -277,14 +316,48 @@ layers (2)–(3).
   7,447 / 17,978 (campaign bracket 7,238 / 17,474, Δ few %); HT totals §2.3;
   same-σ ε and UL §1-D2; detectability audit §1-D3.
 
-## 7. Open decisions (Ansh)
+## 7. Open questions for Ansh
 
-1. UL σ-domain: observed range vs literature-informed log₁₀σ ∈ [−19, −14]?
-2. Faint-by variants: stated (as now) or folded into the headline UL?
-3. τ jitter in the weighted-pairs seed: within histogram bin (status quo
-   visual) or within per-trap fit error (more honest)?
-4. Legacy analysis flavor: migrate alongside minimal_caldet, or freeze?
-5. Keep the old ε(τ) figure in the paper as a "naive marginal" comparison?
+These block or shape implementation. A fresh session should ask them
+**verbatim** (with the context lines) before starting the affected stage, and
+record the answer inline here (`Answered YYYY-MM-DD: ...`).
+
+**Q1 — UL σ-domain (blocks §4.1/§4.2).** The upper limit is a statement about
+trap kinds inside a declared σ range; outside it, only the inertness run
+speaks. *"For the domain-conditional upper limit, do you want the σ domain set
+by the observed catalog range (trimmed of fit-noise extremes), by a
+literature-informed range like log₁₀σ ∈ [−19, −14], or something else? The
+(E, σ) map of §4.6 is built to make this choice visible."*
+Answered: —
+
+**Q2 — faint variants in the headline (shapes §4.4/§6).** *"Should the
+faint-by-2/4 populations stay stated conditional variants, as the paper does
+today, or be folded into the headline UL band?"*
+Answered: —
+
+**Q3 — τ jitter in the weighted seed (shapes §3.3).** *"When the sim draws
+weighted (τ, σ) pairs, should τ be jittered within its old histogram bin
+(status-quo look), within its per-trap fit error (more honest), or not at
+all?"*
+Answered: —
+
+**Q4 — legacy flavor (scopes everything).** *"Migrate the legacy analysis
+flavor alongside minimal_caldet, or freeze legacy at the old correction and
+mark it deprecated?"*
+Answered: —
+
+**Q5 — old ε(τ) figure (shapes §6/paper).** *"Keep the old global-E ε(τ)
+curve in the paper as an explicit 'naive marginal' comparison, or drop it?"*
+Answered: —
+
+**Q6 — inertness-run acceptance (shapes §4.5).** The tiny-σ population's
+suppression is linear for single-e capture but saturates for large-packet
+filling, so the run's outcome is genuinely open. *"What residual excess from
+the detection-consistent tiny-σ population would you accept as 'inert' —
+e.g. <10% of the baseline masked SER residual, or below the run-to-run
+CV (~8%)? And should the run use the σ-domain lower edge from Q1 or scan a
+decade below it?"*
+Answered: —
 
 ## 8. Execution order
 
