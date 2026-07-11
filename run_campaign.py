@@ -1,6 +1,6 @@
 """Run the full CCD trap-simulation campaign: MINOS + SNOLAB conditions,
 baseline + 90% CL upper-limit trap populations. By default only the central
-packet volume V_p = 3 um^3 is run; pass --vp-scan to also sweep the systematic
+packet volume V_p = 1 um^3 is run; pass --vp-scan to also sweep the systematic
 band V_p = {1, 3, 10} um^3.
 
 Scenarios run sequentially (each one already uses all cores internally) in
@@ -46,16 +46,22 @@ FLAVOR_COORD_SUFFIX = {
     'legacy': '',
     'minimal_caldet': '_minimal',
 }
-VP_BASELINE = 3.0
+VP_BASELINE = 1.0
 # V_p values swept, central (baseline) first then the systematic band.
-VP_ORDER = (VP_BASELINE, 1.0, 10.0)
+VP_ORDER = (VP_BASELINE, 3.0, 10.0)
 # Readout binning factor for unbinned data (the default everywhere). Binned
-# variants are opt-in via --binning-factors and only emitted at the central V_p
-# sequencer and three_hour clears (see binnings_for).
+# variants are opt-in via --binning-factors and emitted at every V_p for the
+# sequencer and three_hour clears, in both exposure orders (see
+# order_binning_pairs_for).
 BINNING_BASELINE = 1.0
-# Both clear strategies are run for every scenario: the standard ~3.26 s
-# sequencer clear and the 3-hour continuous clear ('three_hour').
+# All clear strategies available via --clear-modes: the standard ~3.26 s
+# sequencer clear, the 3-hour continuous clear, and the no-clear/binned-0h
+# baseline.
 CLEAR_MODES = ('sequencer', 'three_hour', 'binned_0h')
+# Default --clear-modes: three_hour only, to keep the default campaign's
+# compute cost down. The other clear modes are opt-in variants -- pass e.g.
+# --clear-modes sequencer binned_0h (or the full CLEAR_MODES) to add them.
+DEFAULT_CLEAR_MODES = ('three_hour',)
 CLEAR_LABELS = {
     'instantaneous': 'clearinstant',
     'sequencer': 'clearseq',
@@ -129,30 +135,42 @@ def exposure_orders_for(vp, policy):
     return ['shuffled']
 
 
-def binnings_for(clear_mode, vp, exposure_order, factors):
-    """Readout-binning factors to run for a given clear mode / V_p / exposure
-    order. Always runs unbinned (factor 1.0); binned variants from
-    --binning-factors are added for the sequencer and three_hour clears at every
-    V_p in the enumeration, in the science-default 'shuffled' order -- the
-    configurations the real binned (32x1 superpixel) data was taken in, and the
-    ones where the trap effect has the statistics to resolve a binning shift.
-    (The legacy 'ordered' cycle is a diagnostic, so it is left unbinned to avoid
-    doubling the expensive binned runs.)
+def order_binning_pairs_for(clear_mode, vp, policy, factors):
+    """(exposure_order, binning) pairs to run for a given clear mode / V_p.
+
+    The unbinned factor (1.0) follows the normal --exposure-order-policy
+    gating via exposure_orders_for: 'shuffled' always, 'ordered' added only
+    at the central V_p under 'headline' (default), everywhere under 'all',
+    nowhere under 'none'.
+
+    Binned variants from --binning-factors are added for the sequencer and
+    three_hour clears at every V_p in the enumeration -- the configurations
+    the real binned (32x1 superpixel) data was taken in, and the ones where
+    the trap effect has the statistics to resolve a binning shift -- in BOTH
+    exposure orders, unconditionally (independent of --exposure-order-policy
+    and V_p). Binned scenarios are a real data-taking configuration we want
+    bracketed by both orders directly, not gated by the diagnostic policy
+    that governs the unbinned headline runs.
 
     Binned variants are emitted at every V_p (not just the central one) so the
     V_p systematic band under --vp-scan brackets the binned result on both edges
-    (vp1 and vp10 as well as vp3). This matters under the phase_limited_v1v3
-    transport model, where single-e capture no longer saturates, so the result
-    does depend on V_p (unlike the old full-row model, where V_p barely moved
-    anything and binned was run only at vp3). Binning only divides the per-row
-    readout dwell (tpix/tpix_vertical), shortening the emission window while
-    leaving the fixed V1/V3 capture window (phase_capture_ticks) unchanged.
-    Without --vp-scan the enumeration is vp3-only, so the default headline
-    campaign is unchanged."""
-    out = [BINNING_BASELINE]
-    if clear_mode in ('sequencer', 'three_hour') and exposure_order == 'shuffled':
-        out += [f for f in factors if f != BINNING_BASELINE]
-    return out
+    (vp3 and vp10 as well as the central vp1). This matters under the
+    phase_limited_v1v3 transport model, where single-e capture no longer
+    saturates, so the result does depend on V_p (unlike the old full-row
+    model, where V_p barely moved anything and binned was run only at the
+    central V_p). Binning only divides the per-row readout dwell
+    (tpix/tpix_vertical), shortening the emission window while leaving the
+    fixed V1/V3 capture window (phase_capture_ticks) unchanged. Without
+    --vp-scan the enumeration is central-V_p-only, so the campaign size
+    without --vp-scan is unaffected by the V_p breadth of this rule."""
+    pairs = [(order, BINNING_BASELINE) for order in exposure_orders_for(vp, policy)]
+    if clear_mode in ('sequencer', 'three_hour'):
+        for f in factors:
+            if f == BINNING_BASELINE:
+                continue
+            pairs.append(('shuffled', f))
+            pairs.append(('ordered', f))
+    return pairs
 
 
 def _decode_h5_attr(value):
@@ -257,10 +275,13 @@ def main():
         '--clear-modes',
         nargs='+',
         choices=['instantaneous', 'sequencer', 'three_hour', 'binned_0h'],
-        default=list(CLEAR_MODES),
+        default=list(DEFAULT_CLEAR_MODES),
         help="Clear models to run for every scenario (each adds a separate set of "
-             "output dirs, with the clear version in the label). Default runs both "
-             "the standard sequencer clear and the 3-hour continuous clear.",
+             "output dirs, with the clear version in the label). Default runs only "
+             "the 3-hour continuous clear to keep the default campaign's compute "
+             "cost down; pass e.g. '--clear-modes sequencer three_hour binned_0h' "
+             "to add the standard sequencer clear and/or the no-clear/binned-0h "
+             "baseline as additional variants.",
     )
     parser.add_argument(
         '--exposure-order-policy',
@@ -294,10 +315,12 @@ def main():
         help="Readout-binning factors to simulate (each scales the per-row dwell, "
              "i.e. faster readout). The default [1.0] runs unbinned only, leaving "
              "the campaign unchanged. Pass e.g. '--binning-factors 32' to add a "
-             "32x1-binned variant; binned variants are emitted only for the "
-             "sequencer clear at the central V_p, and get a '_bin<f>' label suffix. "
-             "Under phase_limited_v1v3 binning shortens the emission window but "
-             "leaves the fixed V1/V3 capture window unchanged.",
+             "32x1-binned variant; binned variants are emitted for the sequencer "
+             "and three_hour clears at every V_p, in BOTH exposure orders "
+             "(unconditionally, regardless of --exposure-order-policy), and get "
+             "a '_bin<f>' label suffix. Under phase_limited_v1v3 binning shortens "
+             "the emission window but leaves the fixed V1/V3 capture window "
+             "unchanged.",
     )
     parser.add_argument(
         '--vp-scan',
@@ -368,31 +391,32 @@ def main():
         histfile = POP_HIST[population]
         scale = POP_SCALE[population]
         for clear_mode in args.clear_modes:
-            for exposure_order in exposure_orders_for(vp, args.exposure_order_policy):
-                for binning in binnings_for(clear_mode, vp, exposure_order, args.binning_factors):
-                    label = label_for(
-                        cond,
-                        histfile,
-                        vp,
-                        args.exp_indep_charge_mode,
-                        clear_mode,
-                        exposure_order,
-                        args.flavor,
-                        binning,
-                        args.zero_exp_dep,
-                    )
-                    if args.only and args.only not in label:
-                        continue
-                    outdir = os.path.join(args.out_base, label) + os.sep
-                    n_done, incompatible = count_compatible_runs(
-                        outdir,
-                        args.phase_capture_ticks,
-                        args.v3_phase_fraction,
-                    )
-                    todo.append(
-                        (label, cond, histfile, vp, scale, outdir, n_done,
-                         incompatible, clear_mode, exposure_order, binning)
-                    )
+            for exposure_order, binning in order_binning_pairs_for(
+                clear_mode, vp, args.exposure_order_policy, args.binning_factors
+            ):
+                label = label_for(
+                    cond,
+                    histfile,
+                    vp,
+                    args.exp_indep_charge_mode,
+                    clear_mode,
+                    exposure_order,
+                    args.flavor,
+                    binning,
+                    args.zero_exp_dep,
+                )
+                if args.only and args.only not in label:
+                    continue
+                outdir = os.path.join(args.out_base, label) + os.sep
+                n_done, incompatible = count_compatible_runs(
+                    outdir,
+                    args.phase_capture_ticks,
+                    args.v3_phase_fraction,
+                )
+                todo.append(
+                    (label, cond, histfile, vp, scale, outdir, n_done,
+                     incompatible, clear_mode, exposure_order, binning)
+                )
 
     print(f"{'label':<48} {'hist':<36} {'V_p':>5} {'clear':>10} {'order':>9} {'bin':>5} {'density x':>9} {'done':>6} {'bad':>5}")
     for label, cond, histfile, vp, scale, outdir, n_done, incompatible, clear_mode, exposure_order, binning in todo:
