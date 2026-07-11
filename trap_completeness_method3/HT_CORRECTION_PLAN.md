@@ -11,6 +11,33 @@ should be able to (a) understand why the current correction is invalid,
 (b) understand the replacement estimator, and (c) execute the migration from
 the file/line specs alone.
 
+### Bootstrap for a fresh session (read first)
+
+- **Environment**: conda env `sensei_charge_traps_new` (NOT the name inside
+  `requirements.yaml`). Smoke test — from the repo root, run
+  `conda run -n sensei_charge_traps_new python trap_completeness_method3/probes/ht_2d_correction.py`
+  and confirm it prints `HT-corrected total population: 3919.3` (3,798 dots,
+  min P 0.255). If that reproduces, every input artifact this plan depends on
+  is present and readable.
+- **Line references** in this doc are pinned to commit `a34bbbc`
+  (`git show a34bbbc:<file>` if the working tree has drifted).
+- **Conventions**: probes/one-off scripts go in gitignored `claude_scripts/`,
+  not the repo; never regenerate seed NPZ/H5 artifacts with guessed arguments
+  (verify read-only; Ansh reruns the producing notebook/stage himself); Ansh
+  launches long simulations and cluster campaigns himself; all `paper/paper.tex`
+  edits wrapped in `\claude{}`; git commits carry **no** Claude attribution or
+  Co-Authored-By trailer.
+- **Input artifacts** (all under `trap_completeness_method3/cache/` unless
+  noted): stage-09 grid `09_characterization_probability_minimal_caldet_v1.h5`
+  (`grid/tau_135_seconds` 161 pts [2e-5, 1e9] s, `grid/E_eV` 121 pts [0, 0.7] eV,
+  `results/p_characterized_n_good_4`); catalog
+  `01_records_minimal_caldet_ngood4.csv` (3,798 rows; columns used: `E_eV`,
+  `tau_135_seconds`); repo-root `tau_at_135k_hist_minimal_caldet.npz` and
+  `trap_tau135_sigma_pairs_minimal_caldet.npz` (keys `tau135`, `sigma`,
+  `energy`; 3,798 entries). `ENERGY_FIT_SURVIVAL = 0.972` is applied to
+  "characterized" maps exactly once, in `load_method3`
+  (`figure_utils.py:172,909`) — never a second time downstream.
+
 ---
 
 ## 1. What is wrong with the current correction (measured, not argued)
@@ -111,6 +138,36 @@ Its honest limitation: HT says nothing where P ≈ 0 (no dots exist to carry
 weights). That region is handled by the explicit-domain upper limit (§4), not
 smuggled into the point estimate.
 
+### 2.4 What this does and does not estimate (the "clones" objection)
+
+The completeness question splits into two regimes that demand different tools:
+
+- **Partial visibility (P meaningfully between 0 and 1).** Traps of some kind
+  were catchable but sometimes missed. A data-driven estimate exists: catch n,
+  estimate n/P. HT formalizes exactly this — a trap caught at P = 0.3 stands
+  for ~3.3 traps, so the corrected composition shifts toward the kinds we
+  barely catch. This is the valid core of the paper's "traps near the
+  low-probability border imply a hidden population."
+- **Blindness (P ≈ 0).** Traps that would never have been caught (τ(T) outside
+  the window at all 23 temperatures, or amplitude far below threshold). No
+  data-driven estimate exists here **in principle** — under any method. Any
+  finite number produced for this regime is the prior, not the data; the old
+  correction's 13,466 was 29 observed traps × 1/ε levers of 20–1000 acting on
+  an *assumed* low-E population of which the catalog contains zero examples.
+
+So the point estimate is deliberately "characterized traps reweighted" — that
+is all the data can support pointwise. The hidden-population question is then
+answered in layers, each defensible: (1) unseen traps of *catchable* kinds are
+bounded by the domain UL (§4) — e.g. ~190 allowed in the driver band against
+an HT point estimate of 34, a genuine ~6× allowance, not clones; (2) hidden-
+because-faint, model-following traps are covered by the faint-prior variant
+grids (§4.4); (3) hidden-because-invisible (tiny σ) traps are unbounded in
+*number* but bounded in *effect*: the same σ that hides them from pumping caps
+their capture during operation (capture ∝ σ, unsaturated in the
+phase-limited kernel) — closed by the inertness run (§4.5). HT does not claim
+blind-corner traps don't exist; it refuses to count them and hands them to
+layers (2)–(3).
+
 ### 2.3 Measured result on the current catalog (probe 3)
 
 | region | raw | HT-corrected |
@@ -131,11 +188,18 @@ smuggled into the point estimate.
    `load_method3` convention. Refuse (raise) if any P < 0.10 — currently none;
    report count in [0.10, 0.25). Add `weights`, `N_ht = weights.sum()` to the
    bundle. Reference implementation: [probes/ht_2d_correction.py](probes/ht_2d_correction.py).
-2. **Seed builder**: extend the pairs file
-   (`trap_tau135_sigma_pairs_minimal_caldet.npz`, from `make_trap_pairs.py`)
-   with a `weight` column aligned per trap. ⚠ Open fact to verify first: row
-   identity between `01_records_minimal_caldet_ngood4.csv` and the pairs file
-   (same 3,798 traps? same order? join on (quadrant,row,col) if not).
+2. **Seed builder**: extend `make_trap_pairs.py` to emit a `weight` key in the
+   pairs NPZ. **No records↔pairs join is needed** (verified: `make_pairs`,
+   `make_trap_pairs.py:24-74`, re-derives (τ₁₃₅, σ, E) per trap from the fit
+   HDF5 and saves no coordinates) — instead compute each weight from the
+   pairs' **own** (τ₁₃₅, E) against the stage-09 grid (add a `--stage09-h5`
+   argument). This makes the seed self-consistent by definition: the weight is
+   evaluated at exactly the (τ, E) the simulated trap will carry.
+   Consistency assert: Σweight from the pairs file vs Σweight from the
+   records-CSV bundle path (step 1) must agree within ~1% (both describe the
+   same 3,798-trap selection; the pairs E comes from the corrected-constant
+   refit, the records E from the stored fit, so exact equality is not
+   expected — investigate if the gap exceeds 1%).
 3. **`ccd_simulation.py` `CCD.__init__` (lines 1194–1218)**: replace the
    two-step draw (τ-bin from histogram + nearest-in-τ σ) with one weighted
    categorical draw over the pairs (p ∝ w_i), keeping the per-trap log-jitter
@@ -161,10 +225,23 @@ smuggled into the point estimate.
    existing [6×10⁻⁵, 5×10⁷] s bounds. Expected: total ≈ 4,465, driver ≈ 190.
 3. **Seed consistency**: UL traps are seeded at the same (τ, σ) the limit was
    computed for — σ from the transported dots, never from nearest-measured-τ.
-4. **Faint variants**: recompute the stage-08 amplitude marginalization with
-   the faint-by-2 / faint-by-4 priors → variant P grids → variant weights and
-   ε_D. Reported as stated conditional variants (as the paper already does),
-   expected driver band ≈ 300–1,800.
+   Artifact: `ul_seed_pairs_minimal_caldet.npz` with per-trap `tau135`,
+   `sigma`, `weight` (weight = that bin's UL count spread over its transported
+   dots), replacing the `tau_at_135k_hist_minimal_caldet_upper_limit.npz`
+   histogram seed; consumed through the same weighted-pairs path as §3.
+4. **Faint variants**: the faint priors already exist — the stage-05 NPZ
+   carries `faint_0p5_depth_electrons_at_pc135` (faint-by-2) and
+   `faint_0p25_...` (faint-by-4), and
+   `load_amplitude_prior(variant=...)`
+   (`src/characterization_probability.py:175-189`) is plumbed to read them.
+   What is missing: the stage-09 runner does not expose the variant, and
+   stage 10 only computes curve-level faint sensitivity
+   (`src/validation_sensitivity.py:601-615`), not full 2D maps. Task: thread a
+   `--amplitude-prior-variant` flag through the stage-09 entry point, write
+   variant grids as `09_characterization_probability_minimal_caldet_faint0p5_v1.h5`
+   (and `_faint0p25_`), then recompute weights and ε_D from them. Reported as
+   stated conditional variants (as the paper already does), expected driver
+   band ≈ 300–1,800.
 5. **Beyond-domain closure (optional but recommended)**: one campaign scenario
    seeding the σ < domain population *with its detection-consistent tiny σ*
    (capture α scales ∝ σ) to demonstrate inertness — converts the unbounded
@@ -217,7 +294,7 @@ smuggled into the point estimate.
 | 11a weights + bundle | figure_utils.py | — |
 | 11a seed builder | make_trap_pairs.py | row identity |
 | 11a CCD sampling + seed_mode attr | ccd_simulation.py, run_ccd_simulation.py | seed builder |
-| 11b domain-UL + variants | figure_utils.py, src/ (stage 08 rerun for faint grids) | 11a |
+| 11b domain-UL + variants | figure_utils.py, src/ (stage-09 reruns for faint grids) | 11a |
 | 11c closure + audits | src/naive_efficiency_closure.py, probes/ | 11a/b |
 | 11c bracket rerun | run_campaign.py (cluster) | all above |
 | 11d notebook + paper | notebook/, paper/ | 11c numbers |
