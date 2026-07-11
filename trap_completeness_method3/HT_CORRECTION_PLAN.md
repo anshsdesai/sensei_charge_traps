@@ -222,9 +222,14 @@ exist; it refuses to count them and hands them to layers (2)–(3).
    mixed-mode aggregation in the per-file idempotency guard (precedent:
    `v3_phase_fraction`).
 4. **`run_ccd_simulation.py` / `run_campaign.py`**: new population label
-   `htcorr` (do not reuse `effcorr` — old outputs must not mix):
-   trap-count scale = Σw / n_detected_dipoles, seeds = weighted pairs.
-   `baseline` unchanged.
+   `htcorr` (do not reuse `effcorr` — old outputs must not mix), seeds =
+   weighted pairs. `baseline` unchanged. ⚠ Normalization (advisor gap G6):
+   the campaign convention is that a seed artifact's integral *is* the
+   simulated count (`run_campaign.py` POP_HIST/POP_SCALE) — do NOT also apply
+   a Σw/n_detected scale or the population double-scales. Spec: one
+   authoritative `N_population` stored in the seed NPZ; `CCD.__init__` asserts
+   the realized trap count against it; campaign scale factors derive from it
+   and nothing else.
 
 ## 4. Stage 11b — upper limit (replaces the UL fill)
 
@@ -352,11 +357,45 @@ Answered: —
 
 **Q6 — inertness-run acceptance (shapes §4.5).** The tiny-σ population's
 suppression is linear for single-e capture but saturates for large-packet
-filling, so the run's outcome is genuinely open. *"What residual excess from
-the detection-consistent tiny-σ population would you accept as 'inert' —
-e.g. <10% of the baseline masked SER residual, or below the run-to-run
-CV (~8%)? And should the run use the σ-domain lower edge from Q1 or scan a
-decade below it?"*
+filling, so the run's outcome is genuinely open. Advisor: acceptance must tie
+to the paper's SER uncertainty, not the sim's ~8% run-to-run CV, and a single
+scenario cannot bound an unbounded population — it should be a worst case
+optimized over (E, σ, A, N) subject to the catalog non-observation and a
+physical site-density bound. *"What residual excess from the worst-case
+catalog-consistent tiny-σ population counts as 'inert' — a stated fraction of
+the paper's SER claim? And what physical density bound on defect sites are
+you willing to assert?"*
+Answered: —
+
+**Q7 — headline estimator (shapes everything; advisor verdict 2).** The
+advisor endorses HT for the visible-support estimate and seed construction
+but holds that a *headline paper claim* needs a forward-modeled joint
+likelihood (selection, parameter errors, amplitude prior, population
+template) — HT as diagnostic, likelihood as inference. *"Is the paper claim
+to be carried by (a) the layered HT + domain-UL + inertness statements,
+clearly presented as three conditional statements, or (b) a forward
+likelihood/Bayesian population fit with HT as cross-check? (b) is more
+defensible and substantially more work."*
+Answered: —
+
+**Q8 — full inclusion probability (blocks the 'unbiased' wording; advisor
+gap G1).** Stage-09 P covers intensity-fit recovery (+0.972 energy-fit
+survival) but NOT the dipole finder, spatial masking/eligibility, or
+downstream catalog cuts — the stage-09 catalog-selection factor is explicitly
+disabled in `src/characterization_probability.py` (~line 694). Missing
+selection ⇒ P too high ⇒ HT weights too small (same limitation as the old
+ε, but the new wording claims unbiasedness). *"Do we (a) run end-to-end
+injections into FITS before dipole finding to measure the full inclusion
+probability, or (b) rename the estimand to 'population conditional on dipole
+discovery and spatial eligibility' and state it?"*
+Answered: —
+
+**Q9 — UL construction (shapes §4.2; advisor verdict 4).** Summing per-bin
+Poisson-90% limits is not a 90% limit on the band total (multiplicity;
+undefined within-domain composition). *"Replace with a joint Poisson
+likelihood over bins — total population as parameter, declared σ-mixture
+template + nuisances, simulation-verified coverage — or keep per-bin limits
+and present them only as per-bin statements?"*
 Answered: —
 
 ## 8. Execution order
@@ -371,3 +410,62 @@ Answered: —
 | 11c closure + audits | src/naive_efficiency_closure.py, probes/ | 11a/b |
 | 11c bracket rerun | run_campaign.py (cluster) | all above |
 | 11d notebook + paper | notebook/, paper/ | 11c numbers |
+
+## 9. External review record (codex-advisor, gpt-5.6-sol/xhigh, 2026-07-10)
+
+Read-only adversarial review of this plan + probes + pipeline code, requested
+by Ansh with emphasis on necessity/justifiability/correctness and
+survivorship bias. Thread `019f4f68-4708-7940-b3f4-689d28a07c90`. Verdicts
+(condensed; the numbers refer to the review questions, not plan sections):
+
+1. **D1–D3 core SOUND; two overstatements.** D1's observed ridge does not by
+   itself refute a factorized *true* population (selection can induce E–τ
+   correlation); D2 shows extreme prior sensitivity, not mathematical
+   invalidity. D3 is the strongest defect, but "350× excluded" is overstated
+   because stage-09 P is not the full catalog-inclusion probability — though
+   closing 350× would need an implausibly large omitted-selection loss.
+2. **HT appropriate but not headline-ready alone** → Q7.
+3. **Survivorship bias: the "exactly unbiased" wording is FLAWED.**
+   (a) stage-09 P omits finder/masking/downstream selection → weights too
+   small → Q8; (b) amplitude prior measured from survivors — faint-by-2/4 are
+   sensitivity tests, not corrections; (c) Eddington/error-in-variables bias
+   in 1/P(x̂) near the boundary — small for the total, potentially material
+   for the ~30-trap driver tail → mitigation: posterior/multiple-imputation
+   averaging of 1/P over each trap's fit likelihood; (d) zero-caught kinds
+   correctly delegated to the UL/inertness layers.
+4. **Per-bin Poisson90/ε summed is not a 90% band limit** → Q9.
+5. **Variance**: quote the observed-sample design estimator Σ(1−P)/P² *plus*
+   a two-stage parametric bootstrap (regenerate detection, refit parameters);
+   survivor-only bootstrap is inadequate; the 1% pairs-vs-records check is an
+   alarm only — reconcile trap-by-trap.
+6. **Same-σ transport is a template, not a model-independent efficiency**:
+   use HT-weighted (not raw) dots for ε_D; REJECT (don't clip) transports
+   that leave the calibrated E grid; treat domain membership as uncertain
+   given 14-decade fitted-σ noise; consider a regularized true-σ mixture.
+7. **Inertness/V2**: single-scenario run cannot bound an unbounded
+   population — worst-case optimization needed (folded into Q6); V2 exclusion
+   is defensible only if the paper's claim is narrowed to pumped V1/V3
+   model traps (current paper text makes broader SER claims).
+8. **Missing validations**: closure test must not draw truth from the HT
+   estimate itself (use independent synthetic populations, including
+   misspecified ones); stress-test the assumed cross-temperature independence
+   of detections; propagate selection-grid MC error, noise-map and
+   amplitude-prior uncertainty; quadrant leave-one-out; spatial blocking.
+
+**Adopted immediately** (spec edits in this doc): normalization single-source
+(§3.4 ⚠), ε_D weighting + rejection-not-clipping (§4.2 via verdict 6),
+closure-test independence (§5.1 amended below), variance quotation (verdict
+5), Q6 reworded to worst-case form, new Q7–Q9.
+
+**§5.1 amendment**: closure truths must include (i) populations independent
+of the HT estimate, (ii) at least one deliberately misspecified selection
+(e.g., P shifted by its MC error) to measure sensitivity, not just
+implementation correctness.
+
+**Referee-view summary** (what the rewritten paper section must survive):
+(1) "your P is only curve-fit recovery, not catalog inclusion" → Q8;
+(2) "your 90% band is built from an arbitrary noise-dominated σ template and
+isn't a real 90% limit" → Q9 + declared template + coverage check;
+(3) "invisible tiny-σ/V2 traps make the SER-fraction claim prior-driven" →
+narrow the claim to characterized-model V1/V3 traps + worst-case inertness
+envelope + explicit statement that non-pumped populations are unmeasured.
