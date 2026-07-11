@@ -284,6 +284,35 @@ exist; it refuses to count them and hands them to layers (2)–(3).
      (`ccd_simulation.py:1225-1227`), and were equally outside the old
      correction's scope ("makes no statement about traps that do not follow
      our model"). This stays a stated domain limitation, unchanged.
+
+   **Two concrete test populations** (variant (a) proposed by Ansh
+   2026-07-10; both are conditional stress tests — neither claims the
+   population exists):
+   - **(a) "Old band, made self-consistent."** Keep the global-E averaging as
+     the *count* prior (the old UL fill, ~13,466 driver-band traps), but seed
+     each injected hidden trap with an (E, σ) the correction actually
+     posited: at bin τ, draw E from the observed catalog distribution
+     reweighted by the miss probability, p(E | τ, hidden) ∝ p̂(E)·(1−P(τ,E)),
+     then set σ deterministically by SRH inversion at (τ, E) (probe 2's
+     `implied_E`, inverted). The (1−P) reweighting is essential — drawing
+     from p̂(E) unrestricted would re-inject detectable kinds (the D3 bug in
+     miniature). Bookkeeping: the visible part of the corrected population is
+     already carried by the observed/HT seed, so this scenario adds only the
+     hidden complement, N_hidden(bin) = N_corrected(bin) − N_HT(bin), on top
+     of the baseline seed. Initial occupancy = empty (within the model a
+     tiny-σ trap can rarely have captured; state this assumption — the
+     result leans on it). Answers: "IF the population the old correction
+     posited existed, what would it do to the SER band?"
+   - **(b) "Effect-worst-case envelope"** (advisor G5): the effect-maximizing
+     hidden population is NOT (a) — it concentrates σ at the *largest* value
+     that still evades detection. For each τ bin, place traps at the
+     visibility boundary (largest σ with P(τ, E(σ)) below a declared
+     cutoff, e.g. P < 0.1), with N = Poisson90(n)/P̄ of that kind, subject to
+     the Q6 density bound. This is the number the paper can cite as the
+     envelope; (a) contextualizes the retired band.
+   Expected physics in both: single-e transfer capture suppressed ∝ σ;
+   residual excess dominated by event/bleed large-packet filling of the
+   least-hidden σ in the mix — genuinely nonzero a priori, hence measured.
 6. **(E, σ) rendering of the completeness map**: produce the stage-09 grid,
    catalog dots, and the UL domain boundary re-plotted in (E, log σ) axes via
    the exact affine relabeling log σ = `log_energy_cross_section`(135, E, 0) −
