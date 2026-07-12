@@ -5,9 +5,15 @@
 #
 # Labels come straight from `run_campaign.py --list` with the SAME flags
 # run_one_effcorr.sh uses, so the job set always matches the real enumeration
-# (no hand-maintained list to drift).
+# (no hand-maintained list to drift). Scenario axes (clear-modes, exposure-
+# order-policy, vp-scan) are left at run_campaign.py's own defaults, same as
+# make_joblist.sh/run_one.sh -- only --populations/--zero-exp-dep differ, so
+# the bracket campaign covers the same scenario grid as the headline one.
 #
 # Override defaults via env, e.g.:  TOTAL=100 CHUNK=5 bash make_joblist_effcorr.sh
+# Set VP_SCAN=1 to also queue the V_p systematic band (vp3, vp10) -- see
+# make_joblist.sh for the scenario-count breakdown. run_one_effcorr.sh always
+# passes --vp-scan, so these jobs run correctly regardless.
 set -euo pipefail
 
 REPO=/export/home/adesai/Projects/sensei_charge_traps
@@ -19,12 +25,13 @@ MODES=${MODES:-"pre_readout post_readout"}
 FLAVOR=${FLAVOR:-minimal_caldet}
 BINNING=${BINNING:-32}                     # readout-binning factor; adds _bin32 variants
                                            # (must match run_one_effcorr.sh's --binning-factors)
+VP_SCAN_FLAG=""
+[ -n "${VP_SCAN:-}" ] && VP_SCAN_FLAG="--vp-scan"
 
 : > joblist_effcorr.txt
 for mode in $MODES; do
   python run_campaign.py --flavor "$FLAVOR" --populations effcorr upper --zero-exp-dep \
-      --clear-modes sequencer three_hour --exposure-order-policy all --vp-scan \
-      --binning-factors "$BINNING" \
+      --binning-factors "$BINNING" $VP_SCAN_FLAG \
       --exp-indep-charge-mode "$mode" --list \
     | awk '/^(minos|snolab)_/{print $1}' \
     | while read -r label; do
@@ -36,4 +43,4 @@ for mode in $MODES; do
       done
 done
 
-echo "Wrote $(wc -l < joblist_effcorr.txt) jobs to joblist_effcorr.txt (TOTAL=$TOTAL, CHUNK=$CHUNK, modes: $MODES, binning: $BINNING)."
+echo "Wrote $(wc -l < joblist_effcorr.txt) jobs to joblist_effcorr.txt (TOTAL=$TOTAL, CHUNK=$CHUNK, modes: $MODES, binning: $BINNING, vp_scan: ${VP_SCAN:-off})."

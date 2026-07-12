@@ -27,13 +27,13 @@ conda activate sensei_charge_traps
 cd "$REPO"
 
 # --vp-scan always passed so the V_p band (vp3/vp10) is part of the enumeration
-# universe; --only selects the single scenario this job owns.
+# universe; --only selects the single scenario this job owns. clear-modes and
+# exposure-order-policy are left at run_campaign.py's own defaults (same as
+# run_one.sh) so this campaign's scenario grid matches the headline one.
 exec python run_campaign.py \
     --flavor minimal_caldet \
     --populations effcorr upper \
     --zero-exp-dep \
-    --clear-modes sequencer three_hour \
-    --exposure-order-policy all \
     --vp-scan \
     --binning-factors 32 \
     --exp-indep-charge-mode "$2" \
