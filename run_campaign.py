@@ -380,10 +380,26 @@ def main():
         'effcorr': effcorr_hist,
     }
     POP_SCALE = {'baseline': 1.0, 'upper': upper_scale, 'effcorr': 1.0}
-    # The (tau135, sigma) pairs are refit from the same per-trap selection as the
-    # histogram, so they must track the flavor too; otherwise the sim mixes (e.g.)
-    # the minimal tau histogram with the legacy cross-section pairs.
-    pairs_file = f'trap_tau135_sigma_pairs{hist_suffix}.npz'
+    # (tau135, sigma) pairs by population. BASELINE (measured/characterized) keeps
+    # the refit measured pairs. UPPER and EFFCORR carry the efficiency-correction
+    # inflation -- traps the measurement would have MISSED -- so they use the
+    # MIXTURE pairs file (make_hidden_trap_pairs.py): per tau it draws measured
+    # sigma with weight eps(tau) and the conditional-missed sigma with weight
+    # 1-eps(tau), so the measured-equivalent fraction keeps the detected cross
+    # sections while only the inflated fraction gets the (smaller) missed-trap
+    # sigma. Fixes the bug where the inflated population inherited detected (large)
+    # sigma for traps it represents as unmeasured. Pairs track the flavor suffix
+    # like the histogram, else the sim mixes (e.g.) minimal tau with legacy sigma.
+    measured_pairs = f'trap_tau135_sigma_pairs{hist_suffix}.npz'
+    hidden_pairs = f'trap_tau135_sigma_pairs{hist_suffix}_hidden.npz'
+    POP_PAIRS = {
+        'baseline': measured_pairs,
+        'upper': hidden_pairs,
+        'effcorr': hidden_pairs,
+    }
+    # histfile uniquely identifies the population (POP_HIST is injective), so the
+    # command loop can recover the right pairs file from the histfile alone.
+    HIST_PAIRS = {POP_HIST[p]: POP_PAIRS[p] for p in POP_HIST}
 
     scenarios = build_scenarios(populations=populations, vp_values=vp_values)
     todo = []
@@ -449,7 +465,7 @@ def main():
             '--run-offset', str(run_offset),
             '--runconditions', cond,
             '--tauhistfile', histfile,
-            '--pairsfile', pairs_file,
+            '--pairsfile', HIST_PAIRS[histfile],
             '--packet-volume-um3', str(vp),
             '--binning', str(binning),
             '--phase-capture-ticks', str(args.phase_capture_ticks),
