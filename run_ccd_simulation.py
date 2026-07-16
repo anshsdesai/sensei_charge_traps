@@ -33,11 +33,15 @@ if __name__ == '__main__':
                              "Default 3 um^3: collecting-phase area (~12x5-10 um^2) x thermal vertical spread in the buried channel (~0.02-0.07 um). "
                              "Vary by ~a decade each way as a systematic.")
     parser.add_argument(
-        '--phase-capture-ticks',
+        '--well-shift-overlap-factor',
         type=float,
-        default=300.0,
-        help="Effective V1/V3 phase-overlap capture window in 15 MHz sequencer ticks. "
-             "Default 300 ticks = one V1/V3 hold in daq/temp_scan_run1_imgseq.xml.",
+        default=2.0,
+        help="Multiplier on the per-phase vertical dwell that sets the effective "
+             "V1/V3 capture window per row-shift. By charge conservation + cycle "
+             "symmetry each gate accumulates 2 of the 6 phase-steps of "
+             "charge-presence, so the justified value is 2.0 (1.0 = sole-well "
+             "lower bound). Readout window = factor x 600 ticks (exposeseq), "
+             "clear window = factor x 300 ticks (clearseq). See notebook/physics.qmd 2.4.",
     )
     parser.add_argument(
         '--trap-density-scale',
@@ -172,7 +176,10 @@ if __name__ == '__main__':
         f"Conditions: {args.runconditions}, trap density scale: {args.trap_density_scale:g}, "
         f"packet volume: {args.packet_volume_um3:g} um^3, "
         f"transport: {TRAP_TRANSPORT_MODEL}, "
-        f"phase capture: {args.phase_capture_ticks:g} ticks ({args.phase_capture_ticks / 15e6:.3e} s), "
+        f"well-shift overlap factor: {args.well_shift_overlap_factor:g} "
+        f"(readout {args.well_shift_overlap_factor * 600:g} ticks / "
+        f"{args.well_shift_overlap_factor * 600 / 15e6:.3e} s, "
+        f"clear {args.well_shift_overlap_factor * 300:g} ticks), "
         f"V3 phase fraction: {args.v3_phase_fraction:g}, "
         f"exposure-independent charge: {args.exp_indep_charge_mode}, "
         f"clear: {args.clear_mode}, "
@@ -199,7 +206,7 @@ if __name__ == '__main__':
                 itertools.repeat(args.out),          # output directory (constant)
                 itertools.repeat(args.trap_density_scale), # trap density multiplier (constant)
                 itertools.repeat(args.packet_volume_um3),  # single-carrier packet volume (constant)
-                itertools.repeat(args.phase_capture_ticks),    # V1/V3 phase-overlap capture window
+                itertools.repeat(args.well_shift_overlap_factor),  # V1/V3 well-shift capture-window multiplier
                 itertools.repeat(args.exp_indep_charge_mode), # pre/post active-area readout
                 itertools.repeat(args.clear_mode),         # instantaneous/sequencer/three_hour/binned_0h
                 itertools.repeat(args.binning_0h_factor),  # 0h row-binning factor (binned_0h mode)

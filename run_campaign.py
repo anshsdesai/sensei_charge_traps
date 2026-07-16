@@ -160,7 +160,7 @@ def order_binning_pairs_for(clear_mode, vp, policy, factors):
     model, where V_p barely moved anything and binned was run only at the
     central V_p). Binning only divides the per-row readout dwell
     (tpix/tpix_vertical), shortening the emission window while leaving the
-    fixed V1/V3 capture window (phase_capture_ticks) unchanged. Without
+    fixed V1/V3 capture window (well_shift_overlap_factor) unchanged. Without
     --vp-scan the enumeration is central-V_p-only, so the campaign size
     without --vp-scan is unaffected by the V_p breadth of this rule."""
     pairs = [(order, BINNING_BASELINE) for order in exposure_orders_for(vp, policy)]
@@ -179,7 +179,7 @@ def _decode_h5_attr(value):
     return value
 
 
-def count_compatible_runs(outdir, phase_capture_ticks, v3_phase_fraction):
+def count_compatible_runs(outdir, well_shift_overlap_factor, v3_phase_fraction):
     """Count existing HDF5 outputs compatible with the active transport model."""
     compatible = 0
     incompatible = []
@@ -187,30 +187,30 @@ def count_compatible_runs(outdir, phase_capture_ticks, v3_phase_fraction):
         try:
             with h5py.File(filename, 'r') as f:
                 model = _decode_h5_attr(f.attrs.get('trap_transport_model', ''))
-                ticks = f.attrs.get('phase_capture_ticks', np.nan)
-                # Pre-phase-split files lack the attr -> NaN -> incompatible.
+                # Pre-decoupling files lack this attr -> NaN -> incompatible.
+                factor = f.attrs.get('well_shift_overlap_factor', np.nan)
                 v3_frac = f.attrs.get('v3_phase_fraction', np.nan)
         except OSError as exc:
             incompatible.append((filename, f'unreadable HDF5: {exc}'))
             continue
         try:
-            ticks = float(ticks)
+            factor = float(factor)
         except (TypeError, ValueError):
-            ticks = np.nan
+            factor = np.nan
         try:
             v3_frac = float(v3_frac)
         except (TypeError, ValueError):
             v3_frac = np.nan
         if (
             model == EXPECTED_TRAP_TRANSPORT_MODEL
-            and np.isclose(ticks, phase_capture_ticks, rtol=0.0, atol=1.0e-12)
+            and np.isclose(factor, well_shift_overlap_factor, rtol=0.0, atol=1.0e-12)
             and np.isclose(v3_frac, v3_phase_fraction, rtol=0.0, atol=1.0e-12)
         ):
             compatible += 1
         else:
             incompatible.append((
                 filename,
-                f'model={model!r}, phase_capture_ticks={ticks!r}, '
+                f'model={model!r}, well_shift_overlap_factor={factor!r}, '
                 f'v3_phase_fraction={v3_frac!r}',
             ))
     return compatible, incompatible
@@ -293,10 +293,13 @@ def main():
              "scenario; 'none' runs shuffled only.",
     )
     parser.add_argument(
-        '--phase-capture-ticks',
+        '--well-shift-overlap-factor',
         type=float,
-        default=300.0,
-        help="Effective V1/V3 phase-overlap capture window in 15 MHz sequencer ticks.",
+        default=2.0,
+        help="Multiplier on the per-phase vertical dwell for the effective V1/V3 "
+             "capture window (readout=factor x 600 ticks exposeseq, clear=factor x "
+             "300 ticks clearseq). 2.0 = conservation-justified value; 1.0 = "
+             "sole-well lower bound. See notebook/physics.qmd 2.4.",
     )
     parser.add_argument(
         '--v3-phase-fraction',
@@ -426,7 +429,7 @@ def main():
                 outdir = os.path.join(args.out_base, label) + os.sep
                 n_done, incompatible = count_compatible_runs(
                     outdir,
-                    args.phase_capture_ticks,
+                    args.well_shift_overlap_factor,
                     args.v3_phase_fraction,
                 )
                 todo.append(
@@ -446,8 +449,8 @@ def main():
             print(
                 f"\n!!! {label}: {len(incompatible)} existing HDF5 files have "
                 f"incompatible trap transport metadata for model "
-                f"{EXPECTED_TRAP_TRANSPORT_MODEL!r}, phase_capture_ticks="
-                f"{args.phase_capture_ticks:g} and v3_phase_fraction="
+                f"{EXPECTED_TRAP_TRANSPORT_MODEL!r}, well_shift_overlap_factor="
+                f"{args.well_shift_overlap_factor:g} and v3_phase_fraction="
                 f"{args.v3_phase_fraction:g}. Use a new --out_base or "
                 "delete/regenerate the incompatible files."
             )
@@ -468,7 +471,7 @@ def main():
             '--pairsfile', HIST_PAIRS[histfile],
             '--packet-volume-um3', str(vp),
             '--binning', str(binning),
-            '--phase-capture-ticks', str(args.phase_capture_ticks),
+            '--well-shift-overlap-factor', str(args.well_shift_overlap_factor),
             '--v3-phase-fraction', str(args.v3_phase_fraction),
             '--trap-density-scale', str(scale),
             '--exp-indep-charge-mode', args.exp_indep_charge_mode,

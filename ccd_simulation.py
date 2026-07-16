@@ -987,7 +987,7 @@ class CCD:
         runconditions='minos',
         trap_density_scale=1.0,
         packet_volume_um3=3.0,
-        phase_capture_ticks=300.0,
+        well_shift_overlap_factor=2.0,
         temperature_K=135.0,
         exp_indep_charge_mode='pre_readout',
         clear_mode='sequencer',
@@ -1053,14 +1053,37 @@ class CCD:
         self.clear_sequence = 'daq/temp_scan_run1_clearseq.xml'
         self.clear_clock_hz = 15e6
         self.trap_transport_model = TRAP_TRANSPORT_MODEL
-        self.phase_capture_ticks = float(phase_capture_ticks)
-        if self.phase_capture_ticks < 0:
-            raise ValueError('phase_capture_ticks must be non-negative')
-        self.phase_capture_dwell_s = self.phase_capture_ticks / self.clear_clock_hz
+        # V1/V3 capture window per vertical row-shift. Holes (p-channel) collect
+        # under the non-asserted gate; during one 6-state shift the hole well
+        # steps V2 -> V3 -> V1 -> V2, so a trap under a given gate has charge over
+        # it across three consecutive states (one sole-well step + the two shared
+        # transfer states on either side). By charge conservation
+        # (sum_gates f = 1) and the 3-fold symmetry of the cycle, each gate
+        # accumulates exactly 2 of the 6 per-phase steps of charge-presence,
+        # independent of the transfer dynamics -> the effective capture window is
+        # `well_shift_overlap_factor` (=2) times the per-phase vertical dwell.
+        # Readout uses the exposeseq per-phase dwell (600 ticks,
+        # daq/temp_scan_run1_exposeseq.xml, the operative science readout); the
+        # clear uses the clearseq dwell (300 ticks). `well_shift_overlap_factor`
+        # is the single physics knob: 1.0 = sole-well lower bound (pre-decoupling
+        # behaviour used only the sole-well step of imgseq's 300-tick dwell),
+        # 2.0 = the conservation-justified value. See notebook/physics.qmd 2.4.
+        self.well_shift_overlap_factor = float(well_shift_overlap_factor)
+        if self.well_shift_overlap_factor < 0:
+            raise ValueError('well_shift_overlap_factor must be non-negative')
         self.clear_vertical_phase_count = 6
         self.clear_horizontal_phase_count = 6
-        self.clear_delay_vertical_ticks = 300
+        self.readout_delay_vertical_ticks = 600  # exposeseq delay_V_Overlap
+        self.clear_delay_vertical_ticks = 300    # clearseq delay_V_Overlap
         self.clear_delay_horizontal_ticks = 150
+        self.readout_capture_ticks = (
+            self.well_shift_overlap_factor * self.readout_delay_vertical_ticks
+        )
+        self.clear_capture_ticks = (
+            self.well_shift_overlap_factor * self.clear_delay_vertical_ticks
+        )
+        self.readout_capture_dwell_s = self.readout_capture_ticks / self.clear_clock_hz
+        self.clear_capture_dwell_s = self.clear_capture_ticks / self.clear_clock_hz
         self.clear_delay_switch_ticks = 8
         self.clear_delay_reset_gate_ticks = 15
         self.clear_fast_shifts = 1500
@@ -1225,7 +1248,10 @@ class CCD:
         # The measured pocket-pumped catalog is treated as V1/V3 traps. V2
         # traps would be a separate, unmeasured population and are not included
         # in this baseline transport model.
-        self.trap_capture_alpha = self.trap_kc * self.phase_capture_dwell_s
+        # Readout (exposeseq) and clear (clearseq) have different per-phase
+        # vertical dwells, so they get separate capture windows / alphas.
+        self.trap_capture_alpha_readout = self.trap_kc * self.readout_capture_dwell_s
+        self.trap_capture_alpha_clear = self.trap_kc * self.clear_capture_dwell_s
         # Per-trap clock-phase assignment. Pumping cannot distinguish V1 from
         # V3, but transport can: a V3 trap is crossed by the packet on row
         # EXIT (its own emission gets a same-step recapture roll), a V1 trap
@@ -1349,7 +1375,7 @@ class CCD:
                 self.trap_indices[1],
                 self.clear_fast_emit_probs,
                 self.clear_slow_emit_probs,
-                self.trap_capture_alpha,
+                self.trap_capture_alpha_clear,
                 self.trap_is_v3,
                 self.trapped_charge_1d,
             )
@@ -1360,7 +1386,7 @@ class CCD:
             # thinned for V3 traps (see drain_traps_empty_numba).
             drain_traps_empty_numba(
                 self.trap_taus,
-                self.trap_capture_alpha,
+                self.trap_capture_alpha_clear,
                 self.trap_is_v3,
                 self.trapped_charge_1d,
                 self.clear_fast_dwell_s,
@@ -2102,7 +2128,7 @@ class CCD:
         result_flat = fast_readout_numba(
             image, self.exposure_accumulator, tpix_vertical,
             self.trap_indices[0], self.trap_indices[1],
-            trap_emit_probs, self.trap_capture_alpha, self.trap_is_v3,
+            trap_emit_probs, self.trap_capture_alpha_readout, self.trap_is_v3,
             self.trapped_charge_1d
         )
         self.ccd_state[:] = image
@@ -2127,7 +2153,7 @@ def run_single_trial(
     outdir='./',
     trap_density_scale=1.0,
     packet_volume_um3=3.0,
-    phase_capture_ticks=300.0,
+    well_shift_overlap_factor=2.0,
     exp_indep_charge_mode='pre_readout',
     clear_mode='sequencer',
     binning_0h_factor=32.0,
@@ -2179,8 +2205,11 @@ def run_single_trial(
                 'trap_transport_model',
                 '',
             )
-            existing_phase_capture_ticks = existing.attrs.get(
-                'phase_capture_ticks',
+            # Pre-decoupling files carry 'phase_capture_ticks' but not
+            # 'well_shift_overlap_factor' -> NaN -> rejected below (their readout
+            # window is wrong for the exposeseq readout).
+            existing_well_shift_overlap_factor = existing.attrs.get(
+                'well_shift_overlap_factor',
                 np.nan,
             )
             # Files written before the V1/V3 phase split default to NaN so
@@ -2199,9 +2228,9 @@ def run_single_trial(
         if isinstance(existing_trap_transport_model, bytes):
             existing_trap_transport_model = existing_trap_transport_model.decode()
         try:
-            existing_phase_capture_ticks = float(existing_phase_capture_ticks)
+            existing_well_shift_overlap_factor = float(existing_well_shift_overlap_factor)
         except (TypeError, ValueError):
-            existing_phase_capture_ticks = np.nan
+            existing_well_shift_overlap_factor = np.nan
         try:
             existing_binning = float(existing_binning)
         except (TypeError, ValueError):
@@ -2231,14 +2260,15 @@ def run_single_trial(
                 "Use a separate output directory or regenerate this file."
             )
         if not np.isclose(
-            existing_phase_capture_ticks,
-            float(phase_capture_ticks),
+            existing_well_shift_overlap_factor,
+            float(well_shift_overlap_factor),
             rtol=0.0,
             atol=1.0e-12,
         ):
             raise RuntimeError(
-                f"{filename} was generated with phase_capture_ticks="
-                f"{existing_phase_capture_ticks!r}, not {phase_capture_ticks!r}. "
+                f"{filename} was generated with well_shift_overlap_factor="
+                f"{existing_well_shift_overlap_factor!r}, not {well_shift_overlap_factor!r} "
+                "(NaN = pre-decoupling file with the old single 300-tick window). "
                 "Use a separate output directory or regenerate this file."
             )
         if not np.isclose(existing_binning, float(binning), rtol=0.0, atol=1.0e-12):
@@ -2274,7 +2304,7 @@ def run_single_trial(
         runconditions=runconditions,
         trap_density_scale=trap_density_scale,
         packet_volume_um3=packet_volume_um3,
-        phase_capture_ticks=phase_capture_ticks,
+        well_shift_overlap_factor=well_shift_overlap_factor,
         exp_indep_charge_mode=exp_indep_charge_mode,
         clear_mode=clear_mode,
         binning_0h_factor=binning_0h_factor,
@@ -2364,8 +2394,12 @@ def run_single_trial(
         f.attrs['packet_volume_um3'] = CCDTest.packet_volume_um3
         f.attrs['trap_transport_model'] = CCDTest.trap_transport_model
         f.attrs['v3_phase_fraction'] = CCDTest.v3_phase_fraction
-        f.attrs['phase_capture_ticks'] = CCDTest.phase_capture_ticks
-        f.attrs['phase_capture_dwell_s'] = CCDTest.phase_capture_dwell_s
+        f.attrs['well_shift_overlap_factor'] = CCDTest.well_shift_overlap_factor
+        f.attrs['readout_delay_vertical_ticks'] = CCDTest.readout_delay_vertical_ticks
+        f.attrs['readout_capture_ticks'] = CCDTest.readout_capture_ticks
+        f.attrs['readout_capture_dwell_s'] = CCDTest.readout_capture_dwell_s
+        f.attrs['clear_capture_ticks'] = CCDTest.clear_capture_ticks
+        f.attrs['clear_capture_dwell_s'] = CCDTest.clear_capture_dwell_s
         f.attrs['temperature_K'] = CCDTest.temperature_K
         f.attrs['exp_indep_charge_mode'] = CCDTest.exp_indep_charge_mode
         f.attrs['clear_mode'] = CCDTest.clear_mode

@@ -33,7 +33,7 @@ tpv = pixel_time_vertical(nsamp, ncol, dH, dIp, dIs, dSW, dRG, dOG, dDG) / 15e6
 ref = "campaign/minos_upper_vp3_expind_pre_clearseq_shuf_minimal_caldet/ccd_traps_run0.h5"
 with h5py.File(ref) as f:
     n_det = int(f.attrs['n_detected_traps']); tds = float(f.attrs['trap_density_scale'])
-    pv = float(f.attrs['packet_volume_um3']); pct = float(f.attrs['phase_capture_ticks'])
+    pv = float(f.attrs['packet_volume_um3']); wsof = float(f.attrs.get('well_shift_overlap_factor', 2.0))
     tauhist = f.attrs['tauhistfile']; pairsf = f.attrs['pairsfile']
     tauhist = tauhist.decode() if isinstance(tauhist, bytes) else tauhist
     pairsf = pairsf.decode() if isinstance(pairsf, bytes) else pairsf
@@ -129,7 +129,7 @@ def attach(ccd):
         src = np.zeros(NBIN, np.int64); srl = np.zeros(NBIN, np.int64)
         ro = np.zeros(NBIN, np.int64); sk = np.zeros(NBIN, np.int64)
         flat = readout_instr(image, org, ccd.exposure_accumulator, tpix_vertical,
-                             ccd.trap_indices[0], ccd.trap_indices[1], ep, ccd.trap_capture_alpha,
+                             ccd.trap_indices[0], ccd.trap_indices[1], ep, ccd.trap_capture_alpha_readout,
                              ccd.trapped_charge_1d, ccd._tau_bin, rc, rl, src, srl, ro, sk)
         ccd.ccd_state[:] = image; ccd._int_org[:] = org
         d = ccd._cur
@@ -147,10 +147,10 @@ def attach(ccd):
 # ---- build CCD (minos, sequencer, pre, vp3) ----
 BIN = float(os.environ.get("BIN", "1"))
 tpv_used = tpv / BIN
-print(f"tpix_vertical={tpv_used:.3f}s (BIN={BIN:g})  config: n_det={n_det} tds={tds:.3f} pv={pv} pct={pct}")
+print(f"tpix_vertical={tpv_used:.3f}s (BIN={BIN:g})  config: n_det={n_det} tds={tds:.3f} pv={pv} wsof={wsof}")
 ccd = CCD(tpix, tpv_used, tau_weights, tau_edges, pair_tau135, pair_sigma,
           runconditions='minos', trap_density_scale=tds, packet_volume_um3=pv,
-          phase_capture_ticks=pct, exp_indep_charge_mode='pre_readout',
+          well_shift_overlap_factor=wsof, exp_indep_charge_mode='pre_readout',
           clear_mode='sequencer', binning=1.0, n_detected_traps=n_det)
 print(f"actual num_traps = {len(ccd.trap_indices[0])}")
 attach(ccd)

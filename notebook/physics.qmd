@@ -14,7 +14,7 @@ title: "Simulation physics: emission, capture, recapture, and the deviation budg
 > background, §2 is the model history (only Model C is live), §4 is where things stand. New words are in
 > the [glossary](glossary.qmd).
 
-**Thread status:** current model = `phase_limited_v1v3` (readout capture in a ~20 µs transfer
+**Thread status:** current model = `phase_limited_v1v3` (readout capture in a ~80 µs transfer
 window, full-dwell emission, no full-row recapture). This file folds in the full history of how
 the trap-interaction model reached that point, because two earlier models are still referenced in
 the code comments and in older notes.
@@ -73,8 +73,9 @@ python run_ccd_simulation.py --num_runs 200 --runconditions minos --out minos_co
    pairs) are passed with `itertools.repeat` so they are not re-copied per task.
 
 The physics knobs are all CLI flags, each mapped to a `CCD` constructor argument:
-`--packet-volume-um3` (V_p, default 3), `--phase-capture-ticks` (the 20 µs capture window in 15 MHz
-ticks), `--clear-mode`, `--exposure-order`, `--exp-indep-charge-mode`, `--binning-0h-factor`,
+`--packet-volume-um3` (V_p, default 3), `--well-shift-overlap-factor` (the well-shift capture-window
+multiplier, default 2; readout window = factor × 600 exposeseq ticks = 80 µs, clear = factor × 300
+clearseq ticks = 40 µs), `--clear-mode`, `--exposure-order`, `--exp-indep-charge-mode`, `--binning-0h-factor`,
 `--zero-exp-dep-rate` (trap-only test). Each is persisted to the output HDF5 attrs and guarded (see
 below).
 
@@ -85,7 +86,7 @@ Each worker runs this for one run index `r`:
 1. **Re-seed Numba's PRNG** from `os.getpid() + r*10000`. *Do not remove this* — without it every
    worker forks the same RNG state and produces an identical trap field.
 2. **Idempotency guard.** If `ccd_traps_run{r}.h5` already exists, its stored attrs (`clear_mode`,
-   `exposure_order`, `trap_transport_model`, `phase_capture_ticks`, `binning`,
+   `exposure_order`, `trap_transport_model`, `well_shift_overlap_factor`, `binning`,
    `exp_indep_charge_mode`) are checked against the current config; a match → skip (resumable), a
    mismatch → hard error (never silently mix configs in one directory).
 3. **Build one `CCD(...)`** with the sampled trap field.
@@ -108,7 +109,7 @@ One instance owns one quadrant and everything about it:
 - **`ccd_state`:** the free surface-charge accumulator that persists across images (traps and the
   reservoir carry over; that is what makes exposure order matter).
 - **Timing/config:** `tpix_horizontal`, `tpix_vertical`, `runconditions`, `clear_mode`,
-  `phase_capture_ticks`, packet volume, binning.
+  `well_shift_overlap_factor`, packet volume, binning.
 - **Result accumulators:** `single_e_counts[_no_traps][_masked]`, `unmasked_pixels[_no_traps]`,
   bitmasks — the trap and **paired no-trap** branches (common random numbers; the deviation between
   them is the whole deliverable, §4).
@@ -382,9 +383,20 @@ off; see memory `recapture-pumping-test-open`):
 > "asserted = high rail = hole barrier" is the standard LTA convention and is independently
 > confirmed by the pump-shape argument above.
 
-- **Capture** happens in a `t_phase = 20 µs` transfer window: empty trap with `q ≥ 1` captures with
-  `1 − e^{−q·α}`, `α = σ v_th t_phase / V`. Because the window is short and fixed, capture no longer
-  saturates for single electrons and is **binning-invariant** (α does not scale with readout speed).
+- **Capture** happens in a per-row-transfer window `t_phase`: empty trap with `q ≥ 1` captures with
+  `1 − e^{−q·α}`, `α = σ v_th t_phase / V`. `t_phase = well_shift_overlap_factor × (per-phase vertical
+  dwell)` of the operative sequencer: **readout** uses exposeseq (`delay_V_Overlap = 600` ticks,
+  `daq/temp_scan_run1_exposeseq.xml`, the recipe that reads out the science frames) → `t_phase =
+  1200 ticks = 80 µs`; the **clear** uses clearseq (300 ticks) → `600 ticks = 40 µs`. The factor of 2
+  is exact, not a fudge: holes (non-asserted-gate wells) cross a V1/V3 gate over three consecutive
+  clock states — one sole-well step plus the two shared transfer states on either side — and by charge
+  conservation (`Σ_gates f = 1`) and the 3-fold symmetry of the 6-state cycle, each gate accumulates
+  exactly 2 of the 6 per-phase steps of charge-presence, independent of the (voltage-dependent)
+  transfer dynamics. `well_shift_overlap_factor = 1` recovers the sole-well lower bound. **(Supersedes
+  the earlier single `20 µs` window, which pegged the readout to imgseq's 300-tick per-phase dwell and
+  counted only the sole-well state — a ~4× underestimate of readout α; audited 2026-07-15.)** Because
+  the window is short and fixed, capture no longer saturates for single electrons and is
+  **binning-invariant** (α does not scale with readout speed).
 - **Emission** still runs over the full per-row dwell: occupied trap emits with `1 − e^{−τ_pix/τ}`.
 - **No full-row recapture.** An emitted carrier is not re-captured over the whole dwell.
 - **σ matters again.** Single-e capture probability `∝ σ` (unsaturated), inverting the Model-B
@@ -505,7 +517,7 @@ occupancy, emitted charge during clear is zeroed/lost; (2) `charge_trap_interact
 integration emission `1−e^{−t/τ}`, empty traps do NOT capture (charge under V2); (3) inject dark
 (`∝t`) + spurious (const) + clusters (snolab = t/10); (4) `simulate_readout()` — per row-step,
 occupied→emit `1−e^{−τ_pix/τ}`, empty & q≥1 → capture `1−e^{−q·α}`, `α = σ v_th t_phase / V`,
-`t_phase = 20 µs`.
+`t_phase = 80 µs` (readout = 2 × exposeseq 600-tick per-phase dwell).
 
 Timing (computed from the reference FITS header): `τ_pix = 49.10 s`, `T_read = 512·τ_pix = 6.98 h`
 (bin1) or 13.1 min (bin32, which divides τ_pix only). The per-row dwell is the serial read of the
@@ -568,7 +580,7 @@ What the measurement established (three budget claims overturned):
    occupied large-σ traps). Emission flux ≠ effect.
 3. **The masked observable is CAPTURE-LIMITED, not emission-limited.** `E_read` is binning-dependent
    (19k→10k) but the masked net Δ1e is invariant (61→68), as are sink and net-count. Capture rate
-   `α = σ·v_th·t_phase/V` is fixed by the 20 µs phase window → binning-invariant. The effect is
+   `α = σ·v_th·t_phase/V` is fixed by the ~80 µs readout phase window → binning-invariant. The effect is
    driven by **capture of exposure-accumulated image charge during readout** (∝ exposure → slope;
    α-fixed → binning-invariant) plus its redistribution; the huge emission flux is mostly
    self-recapture cycling that cancels.
