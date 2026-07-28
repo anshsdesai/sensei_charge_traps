@@ -1,6 +1,7 @@
-# HTCondor submit for the chunked CCD trap-simulation campaign.
+# HTCondor submit for the physical E/sigma BASELINE campaign.
 # One job per (scenario label, charge mode, trial offset); each runs a short
-# chunk of trials on a single 1-core slot. Generate joblist.txt with
+# chunk of trials on a single 1-core slot. Corrected/upper jobs use
+# campaign_effcorr.sub instead. Generate joblist.txt with
 # `bash make_joblist.sh` first, then `condor_submit campaign.sub`.
 #
 # Run through /bin/bash (not the script directly) so a stray shebang/exec-format

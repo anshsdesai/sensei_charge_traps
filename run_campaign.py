@@ -1,5 +1,6 @@
 """Run the full CCD trap-simulation campaign: MINOS + SNOLAB conditions,
-baseline + 90% CL upper-limit trap populations. By default only the central
+physical baseline trap population. Completeness-corrected populations remain explicit legacy options.
+By default only the central
 packet volume V_p = 1 um^3 is run; pass --vp-scan to also sweep the systematic
 band V_p = {1, 3, 10} um^3.
 
@@ -8,19 +9,16 @@ priority order, so the campaign can be interrupted at any point and the most
 important results exist first. Completed scenarios (output dir already holds
 num_runs HDF5 files) are skipped, so the script is resumable.
 
-Each population variant passes its OWN tau histogram, whose integral the worker
-seeds n_detected_traps from (it places n_detected_traps * trap_density_scale
-traps). So the density scale is 1.0 for every population -- the histogram itself
-already encodes the population count (baseline = characterized count;
-upper-limit = 90% CL inflated count; efficiency-corrected = completeness point
-estimate). --upper-density-scale remains a manual systematic override only.
-
+The baseline physical population is loaded from `trap_population_esigma*.npz`; its `counts_2d`
+integral defines the full-CCD characterized count. Upper/effcorr scenarios remain on the legacy tau
+histogram plus pairs representation until equivalent physical joint-population files are available.
+`--upper-density-scale` remains a manual systematic override for those legacy corrected scenarios.
 The --effcorr campaign additionally runs the efficiency-corrected point estimate
 with --zero-exp-dep (single-e dark current zeroed) to test whether traps alone
 can reproduce the observed exposure-dependent single-e rate.
 
 Usage:
-    python run_campaign.py                 # central V_p only, 200 trials each
+    python run_campaign.py                 # physical baseline, central V_p, 200 trials each
     python run_campaign.py --vp-scan       # also sweep the V_p systematic band
     python run_campaign.py --only minos_baseline   # filter by label substring
     python run_campaign.py --effcorr --zero-exp-dep   # trap-only effcorr campaign
@@ -34,6 +32,8 @@ import sys
 
 import h5py
 import numpy as np
+
+from trap_population import file_sha256
 
 FLAVOR_HIST_SUFFIX = {
     'legacy': '',
@@ -104,6 +104,7 @@ def label_for(
     flavor='legacy',
     binning=BINNING_BASELINE,
     zero_exp_dep=False,
+    population_model='legacy_tau',
 ):
     if 'efficiency_corrected' in histfile:
         pop = 'effcorr'
@@ -121,7 +122,8 @@ def label_for(
     # Zero-dark-current (trap-only) runs get a _zedr tag so they never collide
     # with future dark-current-on effcorr runs.
     zedr_tag = '_zedr' if zero_exp_dep else ''
-    return f"{cond}_{pop}_vp{vp:g}_{mode}_{clear}_{order}{bin_tag}{zedr_tag}{flavor_tag}".replace('.', 'p')
+    population_tag = '_esigma' if population_model == 'esigma' else ''
+    return f"{cond}_{pop}_vp{vp:g}_{mode}_{clear}_{order}{bin_tag}{zedr_tag}{population_tag}{flavor_tag}".replace('.', 'p')
 
 
 def exposure_orders_for(vp, policy):
@@ -179,7 +181,10 @@ def _decode_h5_attr(value):
     return value
 
 
-def count_compatible_runs(outdir, well_shift_overlap_factor, v3_phase_fraction):
+def count_compatible_runs(
+    outdir, well_shift_overlap_factor, v3_phase_fraction, population_model,
+    population_sha256, base_seed, temperature_K,
+):
     """Count existing HDF5 outputs compatible with the active transport model."""
     compatible = 0
     incompatible = []
@@ -190,6 +195,14 @@ def count_compatible_runs(outdir, well_shift_overlap_factor, v3_phase_fraction):
                 # Pre-decoupling files lack this attr -> NaN -> incompatible.
                 factor = f.attrs.get('well_shift_overlap_factor', np.nan)
                 v3_frac = f.attrs.get('v3_phase_fraction', np.nan)
+                stored_population_model = _decode_h5_attr(
+                    f.attrs.get('population_model', '')
+                )
+                stored_population_sha256 = _decode_h5_attr(
+                    f.attrs.get('population_sha256', '')
+                )
+                stored_base_seed = f.attrs.get('base_seed', np.nan)
+                stored_temperature_K = f.attrs.get('temperature_K', np.nan)
         except OSError as exc:
             incompatible.append((filename, f'unreadable HDF5: {exc}'))
             continue
@@ -201,17 +214,38 @@ def count_compatible_runs(outdir, well_shift_overlap_factor, v3_phase_fraction):
             v3_frac = float(v3_frac)
         except (TypeError, ValueError):
             v3_frac = np.nan
+        try:
+            stored_base_seed = int(stored_base_seed)
+        except (TypeError, ValueError, OverflowError):
+            stored_base_seed = None
+        try:
+            stored_temperature_K = float(stored_temperature_K)
+        except (TypeError, ValueError):
+            stored_temperature_K = np.nan
         if (
             model == EXPECTED_TRAP_TRANSPORT_MODEL
             and np.isclose(factor, well_shift_overlap_factor, rtol=0.0, atol=1.0e-12)
             and np.isclose(v3_frac, v3_phase_fraction, rtol=0.0, atol=1.0e-12)
+            and stored_population_model == population_model
+            and (
+                population_model != 'esigma'
+                or stored_population_sha256 == population_sha256
+            )
+            and stored_base_seed == int(base_seed)
+            and np.isclose(
+                float(stored_temperature_K), float(temperature_K),
+                rtol=0.0, atol=1.0e-12,
+            )
         ):
             compatible += 1
         else:
             incompatible.append((
                 filename,
                 f'model={model!r}, well_shift_overlap_factor={factor!r}, '
-                f'v3_phase_fraction={v3_frac!r}',
+                f'v3_phase_fraction={v3_frac!r}, population_model='
+                f'{stored_population_model!r}, population_sha256='
+                f'{stored_population_sha256!r}, base_seed={stored_base_seed!r}, '
+                f'temperature_K={stored_temperature_K!r}',
             ))
     return compatible, incompatible
 
@@ -226,6 +260,13 @@ def main():
              "tau_at_135k_hist[_upper_limit].npz; 'minimal_caldet' appends "
              "_minimal_caldet to both names and tags output directories accordingly.",
     )
+    parser.add_argument(
+        '--population-model', choices=['esigma', 'legacy_tau'], default='esigma',
+        help="Population model for the baseline catalog. Corrected upper/effcorr "
+             "populations remain on legacy_tau until physical E/sigma files exist.",
+    )
+    parser.add_argument('--temperature-K', type=float, default=135.0)
+    parser.add_argument('--base-seed', type=int, default=20260728)
     parser.add_argument('--num_runs', type=int, default=200,
                         help="Trials per scenario. 200 gives sub-1%% SEM on the "
                              "masked excess (run-to-run CV ~8%%); raise for tighter "
@@ -348,7 +389,15 @@ def main():
     elif args.skip_upper:
         populations = ('baseline',)
     else:
-        populations = ('baseline', 'upper')
+        if args.population_model == 'esigma':
+            populations = ('baseline',)
+            print(
+                'Physical E/sigma campaign defaults to baseline only; pass '
+                '--populations upper/effcorr explicitly to run the legacy '
+                'completeness-corrected populations.'
+            )
+        else:
+            populations = ('baseline', 'upper')
     vp_values = VP_ORDER if args.vp_scan else (VP_BASELINE,)
     # Chunked (HTCondor) mode: --run-offset given (even 0). Each job owns a
     # disjoint trial range; the campaign-level completeness skip is disabled and
@@ -358,14 +407,18 @@ def main():
 
     hist_suffix = FLAVOR_HIST_SUFFIX[args.flavor]
     baseline_hist = f'tau_at_135k_hist{hist_suffix}.npz'
+    baseline_population_file = f'trap_population_esigma{hist_suffix}.npz'
 
-    # Baseline trap population = the characterized-trap count for this flavor,
-    # i.e. the integral of the baseline tau histogram (this is what
-    # run_ccd_simulation seeds n_detected_traps from). (Characterized, not
-    # detected: characterization rejects ~97-99% of decoys; detection does not.)
-    n_baseline_traps = int(round(float(np.load(baseline_hist)['hist'].sum())))
+    # Baseline is the characterized population, not the raw detected count.
+    if args.population_model == 'esigma':
+        with np.load(baseline_population_file) as saved_population:
+            n_baseline_traps = int(round(float(saved_population['counts_2d'].sum())))
+        baseline_count_source = baseline_population_file
+    else:
+        n_baseline_traps = int(round(float(np.load(baseline_hist)['hist'].sum())))
+        baseline_count_source = baseline_hist
     print(f"Baseline trap count ({args.flavor}): {n_baseline_traps} characterized "
-          f"traps from {baseline_hist}.")
+          f"traps from {baseline_count_source}.")
 
     # The upper histogram's integral IS the upper-limit trap count, and the
     # worker seeds n_detected_traps from the histfile integral (it places
@@ -409,6 +462,15 @@ def main():
     for cond, population, vp in scenarios:
         histfile = POP_HIST[population]
         scale = POP_SCALE[population]
+        population_model = (
+            args.population_model if population == 'baseline' else 'legacy_tau'
+        )
+        population_file = (
+            baseline_population_file if population_model == 'esigma' else ''
+        )
+        population_sha256 = (
+            file_sha256(population_file) if population_model == 'esigma' else ''
+        )
         for clear_mode in args.clear_modes:
             for exposure_order, binning in order_binning_pairs_for(
                 clear_mode, vp, args.exposure_order_policy, args.binning_factors
@@ -423,6 +485,7 @@ def main():
                     args.flavor,
                     binning,
                     args.zero_exp_dep,
+                    population_model,
                 )
                 if args.only and args.only not in label:
                     continue
@@ -431,20 +494,26 @@ def main():
                     outdir,
                     args.well_shift_overlap_factor,
                     args.v3_phase_fraction,
+                    population_model,
+                    population_sha256,
+                    args.base_seed,
+                    args.temperature_K,
                 )
                 todo.append(
                     (label, cond, histfile, vp, scale, outdir, n_done,
-                     incompatible, clear_mode, exposure_order, binning)
+                     incompatible, clear_mode, exposure_order, binning,
+                     population_model, population_file)
                 )
 
-    print(f"{'label':<48} {'hist':<36} {'V_p':>5} {'clear':>10} {'order':>9} {'bin':>5} {'density x':>9} {'done':>6} {'bad':>5}")
-    for label, cond, histfile, vp, scale, outdir, n_done, incompatible, clear_mode, exposure_order, binning in todo:
+    print(f"{'label':<48} {'source':<44} {'V_p':>5} {'clear':>10} {'order':>9} {'bin':>5} {'density x':>9} {'done':>6} {'bad':>5}")
+    for label, cond, histfile, vp, scale, outdir, n_done, incompatible, clear_mode, exposure_order, binning, population_model, population_file in todo:
         status = 'SKIP (complete)' if n_done >= args.num_runs else f'{n_done}/{args.num_runs}'
-        print(f"{label:<48} {histfile:<36} {vp:>5g} {clear_mode:>10} {exposure_order:>9} {binning:>5g} {scale:>9.2f} {status:>6} {len(incompatible):>5}")
+        source = population_file or histfile
+        print(f"{label:<48} {source:<44} {vp:>5g} {clear_mode:>10} {exposure_order:>9} {binning:>5g} {scale:>9.2f} {status:>6} {len(incompatible):>5}")
     if args.list:
         return
 
-    for label, cond, histfile, vp, scale, outdir, n_done, incompatible, clear_mode, exposure_order, binning in todo:
+    for label, cond, histfile, vp, scale, outdir, n_done, incompatible, clear_mode, exposure_order, binning, population_model, population_file in todo:
         if incompatible:
             print(
                 f"\n!!! {label}: {len(incompatible)} existing HDF5 files have "
@@ -467,6 +536,9 @@ def main():
             '--num_runs', str(args.num_runs),
             '--run-offset', str(run_offset),
             '--runconditions', cond,
+            '--population-model', population_model,
+            '--temperature-K', str(args.temperature_K),
+            '--base-seed', str(args.base_seed),
             '--tauhistfile', histfile,
             '--pairsfile', HIST_PAIRS[histfile],
             '--packet-volume-um3', str(vp),
@@ -479,6 +551,8 @@ def main():
             '--exposure-order', exposure_order,
             '--out', outdir,
         ]
+        if population_model == 'esigma':
+            cmd += ['--population-file', population_file]
         if args.zero_exp_dep:
             cmd += ['--zero-exp-dep-rate']
         if args.num_workers is not None:

@@ -32,6 +32,7 @@ cd "$REPO"
 # run_one.sh) so this campaign's scenario grid matches the headline one.
 exec python run_campaign.py \
     --flavor minimal_caldet \
+    --population-model legacy_tau \
     --populations effcorr upper \
     --zero-exp-dep \
     --vp-scan \

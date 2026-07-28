@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# HTCondor per-job wrapper: run ONE scenario's trial-chunk on a single slot.
+# HTCondor per-job wrapper: run ONE physical BASELINE scenario chunk.
 #
 # Invoked (via campaign.sub) as:
 #   bash run_one.sh <label> <exp_indep_charge_mode> <run_offset> <num_runs>
@@ -16,6 +16,11 @@ REPO="$HOME/Projects/sensei_charge_traps"
 source "$HOME/miniforge3/etc/profile.d/conda.sh"
 conda activate sensei_charge_traps
 cd "$REPO"
+POPULATION_FILE=trap_population_esigma_minimal_caldet.npz
+if [ ! -f "$POPULATION_FILE" ]; then
+    echo "Missing $REPO/$POPULATION_FILE; sync it from the analysis machine." >&2
+    exit 2
+fi
 
 # --vp-scan is always passed so the V_p band scenarios (vp3/vp10) are part of
 # the enumeration universe; --only still selects the single scenario this job
@@ -23,6 +28,8 @@ cd "$REPO"
 # queued is controlled by make_joblist.sh (VP_SCAN=1).
 exec python run_campaign.py \
     --flavor minimal_caldet \
+    --population-model esigma \
+    --populations baseline \
     --binning-factors 32 \
     --vp-scan \
     --exp-indep-charge-mode "$2" \

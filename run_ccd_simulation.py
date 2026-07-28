@@ -10,6 +10,7 @@ from concurrent.futures import ProcessPoolExecutor
 from tqdm.autonotebook import tqdm
 import itertools
 from ccd_simulation import run_single_trial
+from trap_population import load_population
 import argparse
 
 if __name__ == '__main__':
@@ -25,6 +26,13 @@ if __name__ == '__main__':
     parser.add_argument('--runconditions', type=str, default='minos', choices=['minos', 'snolab'], help="Run conditions configuration to use.")
     parser.add_argument('--binning', type=float, default=1.0, help="Scale factor to divide pixel readout times (simulates binning).")
     parser.add_argument('--out', type=str, default='./', help="Output directory.")
+    parser.add_argument(
+        '--population-model', choices=['esigma', 'legacy_tau'], default='esigma',
+        help="Trap population generator. 'esigma' is the physical default; legacy_tau is retained for A/B validation.",
+    )
+    parser.add_argument('--population-file', type=str, default='trap_population_esigma.npz')
+    parser.add_argument('--temperature-K', type=float, default=135.0)
+    parser.add_argument('--base-seed', type=int, default=20260728)
     parser.add_argument('--tauhistfile', type=str, default='tau_at_135k_hist.npz', help="the histogram file to used to sample tau values.")
     parser.add_argument('--pairsfile', type=str, default='trap_tau135_sigma_pairs.npz',
                         help="Per-trap (tau135, sigma) pairs file (from make_trap_pairs.py) used to assign capture cross-sections.")
@@ -131,41 +139,52 @@ if __name__ == '__main__':
     tpix = (pixel_time(nsamp, delayH, delayIped, delayIsig, delaySW, delayRG, delayOG) / 15e6) / args.binning
     tpix_vertical = (pixel_time_vertical(nsamp, ncol, delayH, delayIped, delayIsig, delaySW, delayRG, delayOG, delayDG) / 15e6) / args.binning
 
-    # Load tau distribution for simulation sampling
-    # fname = 'tau_at_135k_hist.npz' if not args.upperlimit  else ''
-    fname = args.tauhistfile
-    try:
-        tau_data = np.load(fname)
-        tau_weights = tau_data['hist']
-        tau_edges = tau_data['bin_edges']
-        print(f"Loaded {fname} successfully.")
-    except FileNotFoundError:
-        print(f"Error: {fname} not found. Please run run_charge_traps.py first to generate this file.")
-        sys.exit(1)
-
-    # Load measured (tau135, sigma) pairs for the SRH capture/recapture model
-    try:
-        pair_data = np.load(args.pairsfile)
-        pair_tau135 = pair_data['tau135']
-        pair_sigma = pair_data['sigma']
-        print(f"Loaded {args.pairsfile} ({len(pair_tau135)} trap pairs).")
-    except FileNotFoundError:
-        print(f"Error: {args.pairsfile} not found. Please run make_trap_pairs.py first to generate this file.")
-        sys.exit(1)
-
-    # Baseline trap population = the number of *characterized* traps, i.e. the
-    # integral of the tau histogram (each entry is one characterized trap). This
-    # replaces the raw detected-dipole count: detection is a poor false-positive
-    # filter (random/horizontal-null decoys reach "well-behaved" at 20-50%),
-    # whereas characterization rejects ~97-99% of decoys, so the characterized
-    # count is the FP-clean population for which the sampled (tau, sigma) are
-    # actually validated. Detection/characterization incompleteness (real traps
-    # that failed the fit) is bracketed by the upper-limit population variant,
-    # not the baseline.
-    n_baseline_traps = int(round(float(np.sum(tau_weights))))
-    print(f"Baseline trap count: {n_baseline_traps} characterized traps "
-          f"(tau-histogram integral of {fname}).")
-
+    if args.population_model == 'esigma':
+        try:
+            population = load_population(args.population_file)
+        except (FileNotFoundError, ValueError) as exc:
+            print(f"Error loading population {args.population_file}: {exc}")
+            sys.exit(1)
+        population_energy_edges = population['energy_edges_eV']
+        population_log10_sigma_edges = population['log10_sigma_edges']
+        population_counts = population['counts_2d']
+        population_sha256 = population['sha256']
+        n_baseline_traps = int(round(population['population_count_full_ccd']))
+        tau_weights = np.array([1.0])
+        tau_edges = np.array([1.0, 2.0])
+        pair_tau135 = np.array([1.0])
+        pair_sigma = np.array([1e-15])
+        fname = ''
+        pair_fname = ''
+        active_population_file = args.population_file
+        print(
+            f"Loaded {args.population_file}: {population_counts.sum():g} "
+            f"full-CCD traps, SHA256 {population_sha256[:12]}..."
+        )
+    else:
+        fname = args.tauhistfile
+        try:
+            tau_data = np.load(fname)
+            tau_weights = tau_data['hist']
+            tau_edges = tau_data['bin_edges']
+        except FileNotFoundError:
+            print(f"Error: {fname} not found.")
+            sys.exit(1)
+        try:
+            pair_data = np.load(args.pairsfile)
+            pair_tau135 = pair_data['tau135']
+            pair_sigma = pair_data['sigma']
+        except FileNotFoundError:
+            print(f"Error: {args.pairsfile} not found.")
+            sys.exit(1)
+        population_energy_edges = np.array([])
+        population_log10_sigma_edges = np.array([])
+        population_counts = np.empty((0, 0))
+        population_sha256 = ''
+        pair_fname = args.pairsfile
+        active_population_file = ''
+        n_baseline_traps = int(round(float(np.sum(tau_weights))))
+        print(f"Loaded legacy tau/sigma population with {n_baseline_traps} traps.")
     num_runs = args.num_runs
     # Each worker holds its own CCD instance (~2.3 GB private memory), so the
     # default uses half the cores rather than cores-1 to stay within RAM.
@@ -213,10 +232,18 @@ if __name__ == '__main__':
                 itertools.repeat(args.exposure_order),     # shuffled/ordered exposure sequence
                 itertools.repeat(n_baseline_traps),        # baseline characterized-trap count
                 itertools.repeat(fname),                   # tau histogram file (provenance)
-                itertools.repeat(args.pairsfile),          # (tau, sigma) pairs file (provenance)
+                itertools.repeat(pair_fname),              # legacy pairs file (provenance)
                 itertools.repeat(args.binning),            # global readout binning factor (provenance)
                 itertools.repeat(args.zero_exp_dep_rate),  # zero single-e dark current (trap-only test)
                 itertools.repeat(args.v3_phase_fraction),  # V1/V3 clock-phase split (1.0 = old all-V3 kernel)
+                itertools.repeat(args.population_model),
+                itertools.repeat(population_energy_edges),
+                itertools.repeat(population_log10_sigma_edges),
+                itertools.repeat(population_counts),
+                itertools.repeat(active_population_file),
+                itertools.repeat(population_sha256),
+                itertools.repeat(args.temperature_K),
+                itertools.repeat(args.base_seed),
             ),
             total=num_runs,
             desc="Running Trials"

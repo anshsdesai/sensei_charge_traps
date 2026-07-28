@@ -1,5 +1,6 @@
 # HTCondor submit for the trap-only (zero dark-current) BRACKET campaign:
-# effcorr + upper populations, single-electron dark current zeroed. One job per
+# legacy-tau effcorr + upper populations, single-electron dark current zeroed.
+# The physical baseline is submitted separately through campaign.sub. One job per
 # (scenario label, charge mode, trial offset); each runs a short chunk of trials
 # on a single 1-core slot. Generate joblist_effcorr.txt with
 # `bash make_joblist_effcorr.sh` first, then `condor_submit campaign_effcorr.sub`.

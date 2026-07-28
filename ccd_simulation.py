@@ -7,12 +7,126 @@ from scipy.stats import poisson
 from numpy.lib.stride_tricks import as_strided
 
 import os as _os
+import zlib
+
+from srh_physics import emission_time, hole_thermal_velocity as shared_hole_thermal_velocity
+from trap_population import systematic_cell_sample, SAMPLING_MODEL as ESIGMA_SAMPLING_MODEL
 
 # Default detected-dipole count (legacy `dipole_coord_list.npz`). Used only as a
 # fallback for callers that don't pass an explicit count or a coord-list file;
 # the campaign and run_ccd_simulation always derive the true count from disk.
 DEFAULT_N_DETECTED_TRAPS = 5171
 TRAP_TRANSPORT_MODEL = 'phase_limited_v1v3'
+
+# These inputs are fixed for every image in a worker. Keeping them at module
+# scope also lets forked simulation workers build their own cache without any
+# cross-process state or RNG interaction.
+_TRANSPLANT_SOURCE_CACHE = {}
+_TRANSPLANT_CATALOG_CACHE = {}
+
+
+class CompressedMaskList:
+    """List-like storage for the large, sparse per-image uint8 bitmasks."""
+
+    def __init__(self):
+        self._items = []
+
+    @staticmethod
+    def _pack(arr):
+        arr = np.asarray(arr, dtype=np.uint8)
+        return (arr.shape, zlib.compress(arr.tobytes(), 1))
+
+    def append(self, arr):
+        self._items.append(self._pack(arr))
+
+    def __getitem__(self, index):
+        shape, compressed = self._items[index]
+        # copy() gives callers the same writable-array semantics as a plain list.
+        return np.frombuffer(zlib.decompress(compressed), dtype=np.uint8).reshape(shape).copy()
+
+    def __setitem__(self, index, arr):
+        self._items[index] = self._pack(arr)
+
+    def __len__(self):
+        return len(self._items)
+
+
+def _get_cached_transplant_source(filepath, zero_peak_val):
+    """Read and electronize the fixed transplant source once per process."""
+    key = (filepath, zero_peak_val)
+    source = _TRANSPLANT_SOURCE_CACHE.get(key)
+    if source is None:
+        from utils import approximate_electronize, get_qdata
+        source = approximate_electronize(get_qdata(filepath, 0), zero_peak_val).T
+        _TRANSPLANT_SOURCE_CACHE[key] = source
+    return source
+
+
+def _build_transplant_catalog(source_image, count_threshold, max_aspect_ratio, radius):
+    """Precompute the deterministic filtering and extracted chunks for a source."""
+    from scipy import ndimage
+    from scipy.ndimage import distance_transform_edt
+
+    labeled_array, num_features = ndimage.label(source_image > 0)
+    cluster_slices = ndimage.find_objects(labeled_array)
+    cluster_sums = ndimage.sum(
+        source_image, labeled_array, index=np.arange(1, num_features + 1)
+    )
+    src_h, src_w = source_image.shape
+    chunks = [None] * num_features
+
+    for label_id in range(1, num_features + 1):
+        if cluster_sums[label_id - 1] <= count_threshold:
+            continue
+
+        sl = cluster_slices[label_id - 1]
+        y_slice, x_slice = sl
+        height = y_slice.stop - y_slice.start
+        width = x_slice.stop - x_slice.start
+        if min(height, width) == 0:
+            continue
+        if max(height, width) / min(height, width) > max_aspect_ratio:
+            continue
+
+        cluster_mask = labeled_array[sl] == label_id
+        max_streak = np.max(np.sum(cluster_mask, axis=1))
+        fill_factor = np.sum(cluster_mask) / (height * width)
+        if max_streak > 30 and fill_factor < 0.5:
+            continue
+
+        y_start_expanded = max(0, y_slice.start - radius)
+        y_stop_expanded = min(src_h, y_slice.stop + radius)
+        x_start_expanded = max(0, x_slice.start - radius)
+        x_stop_expanded = min(src_w, x_slice.stop + radius)
+        expanded_slice = (
+            slice(y_start_expanded, y_stop_expanded),
+            slice(x_start_expanded, x_stop_expanded),
+        )
+        local_block = source_image[expanded_slice]
+        if np.max(local_block) <= 100:
+            continue
+
+        local_labels = labeled_array[expanded_slice]
+        cluster_core_mask = (local_labels == label_id) & (local_block > 100)
+        dilated_mask = distance_transform_edt(~cluster_core_mask) <= radius
+        foreign_clusters_mask = (local_labels > 0) & (local_labels != label_id)
+        final_cluster_chunk = local_block * dilated_mask
+        final_cluster_chunk[foreign_clusters_mask] = 0
+        chunks[label_id - 1] = final_cluster_chunk
+
+    return num_features, chunks
+
+
+def _get_cached_transplant_catalog(source_image, cache_key, count_threshold,
+                                   max_aspect_ratio, radius):
+    key = (cache_key, count_threshold, max_aspect_ratio, radius)
+    catalog = _TRANSPLANT_CATALOG_CACHE.get(key)
+    if catalog is None:
+        catalog = _build_transplant_catalog(
+            source_image, count_threshold, max_aspect_ratio, radius
+        )
+        _TRANSPLANT_CATALOG_CACHE[key] = catalog
+    return catalog
 
 
 def coord_list_for_tauhist(tauhistfile):
@@ -292,14 +406,8 @@ def findBadCells(data, nCells, already_bad=None, nHDUs=1, doChunkCut=False):
 
 
 def hole_thermal_velocity(temperatures):
-    """v_th = sqrt(3 k_B T / m_cond) for holes in cm/s.
-
-    Constants match dipole.log_energy_cross_section (p-channel hole
-    conductivity effective mass 0.41 m_e for 100-200 K)."""
-    kb = 8.617333262e-5  # eV/K
-    me = 0.510998950e6   # eV
-    m_cond = 0.41 * me
-    return 2.99792458e10 * np.sqrt(3 * kb * temperatures / m_cond)
+    """Compatibility wrapper for the shared hole thermal velocity."""
+    return shared_hole_thermal_velocity(temperatures)
 
 
 def pixel_time(nsamp, delayH, delayIped, delayIsig, delaySW, delayRG, delayOG):		# Time to read 1 pixel
@@ -310,132 +418,58 @@ def pixel_time_vertical(nsamp,ncol, delayH, delayIped, delayIsig, delaySW, delay
   return (pixel_time_hor+(int(delaySW)+int(delayDG)))*int(ncol)
 
 
-def transplant_clusters(source_image, target_shape=(520, 3200), 
-                                    count_threshold=20, max_aspect_ratio=3.0, 
-                                    radius=20,exposure=72000,scale_factor = 1):
-    from skimage.morphology import dilation, disk
-    from scipy import ndimage
-    from scipy.ndimage import distance_transform_edt
-    import numpy as np
-    
-    # 1. Label and Measure
-    labeled_array, num_features = ndimage.label(source_image > 0)
-    cluster_slices = ndimage.find_objects(labeled_array)
-    cluster_sums = ndimage.sum(source_image, labeled_array, index=np.arange(1, num_features + 1))
-    
+def transplant_clusters(source_image, target_shape=(520, 3200),
+                        count_threshold=20, max_aspect_ratio=3.0,
+                        radius=20, exposure=72000, scale_factor=1,
+                        rng=None, catalog=None):
+    """Randomly transplant selected source clusters into a blank target image.
+
+    ``catalog`` is optional so existing notebook callers keep their original
+    behavior; simulation callers supply the cached deterministic catalog.
+    """
+    if catalog is None:
+        catalog = _build_transplant_catalog(
+            source_image, count_threshold, max_aspect_ratio, radius
+        )
+    num_features, chunks = catalog
     new_image = np.zeros(target_shape, dtype=source_image.dtype)
     img_h, img_w = new_image.shape
-    src_h, src_w = source_image.shape
-    rng = np.random.default_rng()
-    
-    totClusters = num_features
-    # Calculate how many we WANT to process
-    target_num_clusters = int(np.round(scale_factor * (exposure / 72000) * num_features))
-    
-    # print(f"Exposure: {exposure}, Inserting approx {target_num_clusters} clusters out of {totClusters}")
+    if rng is None:
+        rng = np.random.default_rng()
 
-    # --- FIX START: Randomize the selection ---
-    # Create a list of all valid IDs (1 to num_features)
+    # Selection deliberately happens over every source label, including labels
+    # whose cached chunk is None. This retains the prior selected-then-filtered
+    # population and RNG sequence exactly.
+    target_num_clusters = int(
+        np.round(scale_factor * (exposure / 72000) * num_features)
+    )
     all_label_ids = np.arange(1, num_features + 1)
-    
-    # Shuffle them randomly
     rng.shuffle(all_label_ids)
-    
-    # Select only the first N IDs from the shuffled list
     selected_labels = all_label_ids[:target_num_clusters]
-    # --- FIX END ---
 
-    # 2. Loop through the RANDOMLY SELECTED clusters
     for label_id in selected_labels:
-        
-        # --- FILTERS (Count & Shape) ---
-        # Note: adjust index by -1 because cluster_sums is 0-indexed relative to labels
-        if cluster_sums[label_id - 1] <= count_threshold:
+        final_cluster_chunk = chunks[label_id - 1]
+        if final_cluster_chunk is None:
             continue
 
-        sl = cluster_slices[label_id - 1]
-        y_slice, x_slice = sl
-        height = y_slice.stop - y_slice.start
-        width = x_slice.stop - x_slice.start
-        
-        if min(height, width) == 0: continue
-        if max(height, width) / min(height, width) > max_aspect_ratio:
-            continue
-
-        cluster_mask = (labeled_array[sl] == label_id)
-        
-        # Find the maximum horizontal streak in any single row
-        max_streak = np.max(np.sum(cluster_mask, axis=1))
-        
-        # Calculate how "solid" the cluster is compared to its bounding box
-        fill_factor = np.sum(cluster_mask) / (height * width)
-        
-        # If it has a long horizontal line (> 30 pixels) AND is mostly empty space (< 50% solid),
-        # it is a serial register hit attached to another event. Reject it entirely.
-        if max_streak > 30 and fill_factor < 0.5:
-            continue
-
-        # ... (Rest of your code remains exactly the same) ...
-        # ... EXPAND SLICE ...
-        y_start_expanded = max(0, y_slice.start - radius)
-        y_stop_expanded  = min(src_h, y_slice.stop + radius)
-        x_start_expanded = max(0, x_slice.start - radius)
-        x_stop_expanded  = min(src_w, x_slice.stop + radius)
-        
-        expanded_slice = (slice(y_start_expanded, y_stop_expanded), 
-                          slice(x_start_expanded, x_stop_expanded))
-        
-        local_block = source_image[expanded_slice]
-        if np.max(local_block) <= 100:
-            continue
-
-        local_labels = labeled_array[expanded_slice]
-        
-        # cluster_core_mask = (local_labels == label_id)
-        cluster_core_mask = (local_labels == label_id) & (local_block > 100)
-        # 1. Compute distance from the cluster (invert mask so cluster is 0)
-        # 'distance_transform_edt' calculates distance to the nearest ZERO pixel.
-        # So we invert: Cluster becomes False (0), Background becomes True (1).
-
-        dist_map = distance_transform_edt(~cluster_core_mask)
-
-        # 2. Threshold by radius to create the mask
-        dilated_mask = dist_map <= radius
-
-        foreign_clusters_mask = (local_labels > 0) & (local_labels != label_id)
-
-        final_cluster_chunk = local_block * dilated_mask
-        final_cluster_chunk[foreign_clusters_mask] = 0
-
-        
-     
-        
-        
-        # --- PLACEMENT ---
         h, w = final_cluster_chunk.shape
         placed = False
         attempts = 0
-        
         while not placed and attempts < 100:
             max_r = img_h - h
             max_c = img_w - w
-            
-            if max_r < 0 or max_c < 0: break
+            if max_r < 0 or max_c < 0:
+                break
 
             r = rng.integers(0, max_r)
             c = rng.integers(0, max_c)
-            
-            target_area = new_image[r:r+h, c:c+w]
-            
+            target_area = new_image[r:r + h, c:c + w]
             if not np.any((target_area > 0) & (final_cluster_chunk > 0)):
-                new_image[r:r+h, c:c+w] += final_cluster_chunk
+                new_image[r:r + h, c:c + w] += final_cluster_chunk
                 placed = True
-            
             attempts += 1
-            
+
     return new_image
-
-
 
 def unbin_counts_conservative(binned_data):
     import numpy as np
@@ -486,14 +520,15 @@ def unbin_counts_conservative(binned_data):
     return final_data.reshape(rows * expansion, cols)
 
 
-def inject_single_e(image, n_events=100, intensity=1, exclusion_mask=None):
+def inject_single_e(image, n_events=100, intensity=1, exclusion_mask=None, rng=None):
     import numpy as np
     """
     Injects 'n' single-pixel events into the image.
     If 'exclusion_mask' is provided, events will NOT be placed where the mask is True.
     """
     rows, cols = image.shape
-    rng = np.random.default_rng()
+    if rng is None:
+        rng = np.random.default_rng()
     
     if exclusion_mask is None:
         # Original behavior: Randomly select from the whole image
@@ -528,31 +563,20 @@ def inject_single_e(image, n_events=100, intensity=1, exclusion_mask=None):
 
 
 def generate_halo_mask(image, threshold=100, radius=60):
-    from scipy.ndimage import distance_transform_edt
-    
-    # 1. Find pixels that exceed the threshold
+    import cv2
+
     hot_pixels = image > threshold
-    
-    # 2. Compute distance from every pixel to the nearest hot pixel
-    # distance_transform_edt calculates the distance from non-zero pixels 
-    # to the nearest zero pixel.
-    # Therefore, we INVERT the mask: 
-    #   - Hot pixels become 0 (Targets)
-    #   - Background becomes 1 (Source)
-    # The result is a map where every pixel contains its distance to the nearest hot pixel.
-    dist_map = distance_transform_edt(~hot_pixels)
-    
-    # 3. Threshold the distance map
-    # Pixels with distance <= radius are within the halo.
-    mask = dist_map <= radius
-    
-    return mask
+    # SciPy has a finite virtual-boundary convention for an all-foreground EDT,
+    # while OpenCV returns no finite distances. Preserve the legacy result in
+    # this rare no-hot-pixel case.
+    if not np.any(hot_pixels):
+        from scipy.ndimage import distance_transform_edt
+        return distance_transform_edt(~hot_pixels) <= radius
 
-
-
-
-
-
+    dist_map = cv2.distanceTransform(
+        (~hot_pixels).astype(np.uint8), cv2.DIST_L2, cv2.DIST_MASK_PRECISE
+    )
+    return dist_map <= radius
 
 import numpy as np
 
@@ -996,6 +1020,14 @@ class CCD:
         n_detected_traps=DEFAULT_N_DETECTED_TRAPS,
         zero_exp_dep_rate=False,
         v3_phase_fraction=0.5,
+        population_model='legacy_tau',
+        population_energy_edges=None,
+        population_log10_sigma_edges=None,
+        population_counts=None,
+        population_file='',
+        population_sha256='',
+        rng=None,
+        image_rng=None,
     ):
         import numpy as np
         # self.original_image = np.copy(image_array)
@@ -1004,6 +1036,11 @@ class CCD:
         self.tpix_horizontal = tpix_horizontal
         self.tpix_vertical = tpix_vertical
         self.runconditions = runconditions
+        self.rng = rng if rng is not None else np.random.default_rng()
+        self.image_rng = image_rng if image_rng is not None else self.rng
+        self.population_model = population_model
+        self.population_file = population_file
+        self.population_sha256 = population_sha256
         valid_exp_indep_charge_modes = ('pre_readout', 'post_readout')
         if exp_indep_charge_mode not in valid_exp_indep_charge_modes:
             raise ValueError(
@@ -1037,8 +1074,8 @@ class CCD:
         # Raw images are omitted by default to save RAM but can be explicitly requested
         self.reconstructed_images = [] 
         self.no_trap_images = []
-        self.trap_bitmasks = []
-        self.notrap_bitmasks = []
+        self.trap_bitmasks = CompressedMaskList()
+        self.notrap_bitmasks = CompressedMaskList()
         self.exposures = []
 
         self.single_e_counts = []
@@ -1190,59 +1227,80 @@ class CCD:
         # self.trapped_charge = np.zeros(shape, dtype=float)
 
 
-        # --- OPTIMIZATION 1: SPARSE TRAP STORAGE ---
-        # Instead of a full boolean mask, store the coordinates of traps
-        # trap_density calculation remains the same...
-        # Baseline trap population = the detected dipole count (run_charge_traps
-        # `dipole_coord_list*.npz`), spread over the four quadrants. Passed in so
-        # it tracks the actual detection (e.g. 5171 legacy vs 9333 minimal)
-        # instead of a stale literal; the upper-limit scale corrects this upward.
-        self.n_detected_traps = int(n_detected_traps)
-        baseline_trap_density = (self.n_detected_traps / 4) / (self.nrow_quad * self.ncol_quad)
-        trap_density = baseline_trap_density * trap_density_scale
-        if not 0 <= trap_density <= 1:
-            raise ValueError(
-                f"trap_density_scale={trap_density_scale} gives invalid "
-                f"per-pixel trap probability {trap_density}"
+        # --- SPARSE TRAP POPULATION ---
+        self.trap_density_scale = float(trap_density_scale)
+        self.temperature_K = float(temperature_K)
+        rng = self.rng
+        npix_quad = self.nrow_quad * self.ncol_quad
+
+        if self.population_model == 'esigma':
+            if population_energy_edges is None or population_log10_sigma_edges is None or population_counts is None:
+                raise ValueError('esigma population requires energy/sigma edges and counts_2d')
+            sampled = systematic_cell_sample(
+                np.asarray(population_energy_edges, dtype=float),
+                np.asarray(population_log10_sigma_edges, dtype=float),
+                np.asarray(population_counts, dtype=float),
+                self.trap_density_scale,
+                0.25,
+                self.temperature_K,
+                rng,
             )
-        self.trap_density = trap_density
-        self.trap_density_scale = trap_density_scale
-        rng = np.random.default_rng()
-        self.trap_mask = rng.random(shape) < trap_density
-        
-        # Store indices (tuple of row_indices, col_indices) for fast access
-        self.trap_indices = np.where(self.trap_mask)
-        num_traps = len(self.trap_indices[0])
-        
-        # Store Tau values as a 1D array corresponding to the indices
-        probs = np.array(tau_weights) / np.sum(tau_weights)
-        
-        # 1. Select a bin for each trap
-        bin_indices = rng.choice(len(probs), size=num_traps, p=probs)
-        # 2. Sample continuously (log-uniform) between the edges of the selected bin
-        left_edges = tau_edges[bin_indices]
-        right_edges = tau_edges[bin_indices + 1]
-        self.trap_taus = np.exp(rng.uniform(np.log(left_edges), np.log(right_edges)))
+            num_traps = len(sampled['tau_s'])
+            if num_traps > npix_quad:
+                raise ValueError(f'esigma population requests {num_traps} traps in {npix_quad} pixels')
+            flat_indices = rng.choice(npix_quad, size=num_traps, replace=False)
+            rows, cols = np.unravel_index(flat_indices, shape)
+            self.trap_indices = (rows.astype(np.int64), cols.astype(np.int64))
+            self.trap_mask = np.zeros(shape, dtype=bool)
+            self.trap_mask[self.trap_indices] = True
+            self.trap_energies = sampled['energy_eV']
+            self.trap_log10_sigmas = sampled['log10_sigma']
+            self.trap_sigmas = sampled['sigma_cm2']
+            self.trap_taus = sampled['tau_s']
+            self.trap_cell_energy_index = sampled['cell_energy_index']
+            self.trap_cell_sigma_index = sampled['cell_sigma_index']
+            self.expected_quadrant_traps = sampled['expected_quadrant_count']
+            self.n_detected_traps = int(round(float(np.sum(population_counts))))
+            self.population_sampling_model = ESIGMA_SAMPLING_MODEL
+        elif self.population_model == 'legacy_tau':
+            self.n_detected_traps = int(n_detected_traps)
+            baseline_trap_density = (self.n_detected_traps / 4) / npix_quad
+            requested_density = baseline_trap_density * self.trap_density_scale
+            if not 0 <= requested_density <= 1:
+                raise ValueError(
+                    f'trap_density_scale={trap_density_scale} gives invalid '
+                    f'per-pixel trap probability {requested_density}'
+                )
+            self.trap_mask = rng.random(shape) < requested_density
+            self.trap_indices = np.where(self.trap_mask)
+            num_traps = len(self.trap_indices[0])
+            probs = np.asarray(tau_weights, dtype=float) / np.sum(tau_weights)
+            bin_indices = rng.choice(len(probs), size=num_traps, p=probs)
+            left_edges = tau_edges[bin_indices]
+            right_edges = tau_edges[bin_indices + 1]
+            self.trap_taus = np.exp(rng.uniform(np.log(left_edges), np.log(right_edges)))
+            pair_tau135 = np.asarray(pair_tau135, dtype=float)
+            pair_sigma = np.asarray(pair_sigma, dtype=float)
+            order = np.argsort(pair_tau135)
+            sorted_logtau = np.log(pair_tau135[order])
+            sorted_sigma = pair_sigma[order]
+            K = min(20, len(sorted_sigma))
+            ins = np.searchsorted(sorted_logtau, np.log(self.trap_taus))
+            lo = np.clip(ins - K // 2, 0, len(sorted_sigma) - K)
+            self.trap_sigmas = sorted_sigma[lo + rng.integers(0, K, size=num_traps)]
+            self.trap_energies = np.full(num_traps, np.nan)
+            self.trap_log10_sigmas = np.log10(self.trap_sigmas)
+            self.trap_cell_energy_index = np.full(num_traps, -1, dtype=np.int32)
+            self.trap_cell_sigma_index = np.full(num_traps, -1, dtype=np.int32)
+            self.expected_quadrant_traps = self.n_detected_traps * self.trap_density_scale / 4.0
+            self.population_sampling_model = 'legacy_tau_nearest_sigma'
+        else:
+            raise ValueError(f'Unknown population_model={self.population_model!r}')
 
-        # --- SRH capture/recapture parameters ---
-        # Each trap gets a capture cross-section resampled from the measured
-        # (tau_e(135K), sigma) pairs nearest in log(tau), preserving the
-        # empirical tau-sigma correlation. The per-carrier capture rate is
-        # kc = sigma * v_th / V_packet, where V_packet is the effective
-        # volume explored by a single carrier confined in a pixel well.
-        pair_tau135 = np.asarray(pair_tau135, dtype=float)
-        pair_sigma = np.asarray(pair_sigma, dtype=float)
-        order = np.argsort(pair_tau135)
-        sorted_logtau = np.log(pair_tau135[order])
-        sorted_sigma = pair_sigma[order]
-        K = min(20, len(sorted_sigma))
-        ins = np.searchsorted(sorted_logtau, np.log(self.trap_taus))
-        lo = np.clip(ins - K // 2, 0, len(sorted_sigma) - K)
-        self.trap_sigmas = sorted_sigma[lo + rng.integers(0, K, size=num_traps)]
-
+        self.trap_density = num_traps / npix_quad
         self.packet_volume_um3 = packet_volume_um3
         self.temperature_K = temperature_K
-        v_th = hole_thermal_velocity(temperature_K)  # cm/s
+        v_th = shared_hole_thermal_velocity(temperature_K)  # cm/s
         packet_volume_cm3 = packet_volume_um3 * 1e-12
         self.trap_kc = self.trap_sigmas * v_th / packet_volume_cm3  # per-carrier capture rate [1/s]
         # The measured pocket-pumped catalog is treated as V1/V3 traps. V2
@@ -1408,7 +1466,6 @@ class CCD:
 
     def take_fake_image(self,exposure_time_hours,radius=60,store_image=False):
         import numpy as np
-        from utils import approximate_electronize,get_qdata
         # from skimage.morphology import disk, binary_dilation
 
 
@@ -1434,13 +1491,21 @@ class CCD:
         #now generate fake image
         file = 'minos_image/proc_corr_proc_skp_72000secs_exp_run10_NSAMP_300_36.fits'
 
-        q0 = get_qdata(file,0)
-
-        q0 =approximate_electronize(q0,400)
-        if self.runconditions == 'minos':
-            q0_blank= transplant_clusters(q0.T, target_shape=(self.nrow_quad, self.ncol_quad),count_threshold=100, max_aspect_ratio=3.0,radius=radius,exposure=exp)
-        elif self.runconditions == 'snolab':
-            q0_blank= transplant_clusters(q0.T, target_shape=(self.nrow_quad, self.ncol_quad),count_threshold=100, max_aspect_ratio=3.0,radius=radius,exposure=exp/10)
+        source = _get_cached_transplant_source(file, 400)
+        catalog = _get_cached_transplant_catalog(
+            source, (file, 400), 100, 3.0, radius
+        )
+        transplant_exposure = exp if self.runconditions == 'minos' else exp / 10
+        q0_blank = transplant_clusters(
+            source,
+            target_shape=(self.nrow_quad, self.ncol_quad),
+            count_threshold=100,
+            max_aspect_ratio=3.0,
+            radius=radius,
+            exposure=transplant_exposure,
+            catalog=catalog,
+            rng=self.image_rng,
+        )
 
         # footprint = disk(radius)
 
@@ -1453,6 +1518,7 @@ class CCD:
             n_events=n_exp_dep_events,
             intensity=1,
             exclusion_mask=None,
+            rng=self.image_rng,
         )
         if self.exp_indep_charge_mode == 'pre_readout':
             q0_fake = inject_single_e(
@@ -1460,6 +1526,7 @@ class CCD:
                 n_events=n_exp_indep_events,
                 intensity=1,
                 exclusion_mask=None,
+                rng=self.image_rng,
             )
         # self.no_trap_images.append(q0_fake)
 
@@ -1491,6 +1558,7 @@ class CCD:
                 n_events=n_exp_indep_events,
                 intensity=1,
                 exclusion_mask=None,
+                rng=self.image_rng,
             )
             img_trap += post_readout_charge
             img_notrap += post_readout_charge
@@ -1625,12 +1693,13 @@ class CCD:
 
             def apply_masks(indices, bitmasks, bad_cols, bad_pix):
                 for i in indices:
+                    m = bitmasks[i]
                     if bad_cols:
-                        bitmasks[i][:, bad_cols] |= BIT_HOTCOL
+                        m[:, bad_cols] |= BIT_HOTCOL
                     if bad_pix:
                         rs, cs = zip(*bad_pix)
-                        bitmasks[i][rs, cs] |= BIT_HOTPIX
-            
+                        m[rs, cs] |= BIT_HOTPIX
+                    bitmasks[i] = m
             # Apply Mask B to Images A
             apply_masks(idx_A, self.trap_bitmasks, bad_cols_tB, bad_pix_tB)
             apply_masks(idx_A, self.notrap_bitmasks, bad_cols_ntB, bad_pix_ntB)
@@ -2164,6 +2233,14 @@ def run_single_trial(
     binning=1.0,
     zero_exp_dep_rate=False,
     v3_phase_fraction=0.5,
+    population_model='legacy_tau',
+    population_energy_edges=None,
+    population_log10_sigma_edges=None,
+    population_counts=None,
+    population_file='',
+    population_sha256='',
+    temperature_K=135.0,
+    base_seed=20260728,
 ):
     """This function contains everything needed for a single trial"""
     import os
@@ -2173,13 +2250,16 @@ def run_single_trial(
             f"Unknown exposure_order={exposure_order!r}; "
             f"expected one of {valid_exposure_orders}"
         )
-    # Guarantee a unique PRNG sequence for Numba across all forked child processes
-    seed_numba(os.getpid() + (r * 10000))
-    # Also seed the legacy global np.random stream (np.random.poisson in
-    # take_fake_image, np.random.random in charge_trap_interaction): fork-started
-    # workers otherwise inherit identical state, correlating trials within a
-    # node (review F10). Trap/no-trap CRN pairing is unaffected.
-    np.random.seed((os.getpid() + (r * 10000)) % (2 ** 32))
+    # Stable named streams: trial r is reproducible independent of process ID,
+    # worker count, host, or campaign chunking.
+    seed_sequence = np.random.SeedSequence([int(base_seed), int(r)])
+    population_ss, image_ss, legacy_ss, numba_ss, shuffle_ss = seed_sequence.spawn(5)
+    population_rng = np.random.default_rng(population_ss)
+    image_rng = np.random.default_rng(image_ss)
+    legacy_seed = int(legacy_ss.generate_state(1, dtype=np.uint32)[0])
+    numba_seed = int(numba_ss.generate_state(1, dtype=np.uint32)[0])
+    np.random.seed(legacy_seed)
+    seed_numba(numba_seed)
     
     import h5py
     import os
@@ -2219,6 +2299,10 @@ def run_single_trial(
                 np.nan,
             )
             existing_binning = existing.attrs.get('binning', 1.0)
+            existing_population_model = existing.attrs.get('population_model', '')
+            existing_population_sha256 = existing.attrs.get('population_sha256', '')
+            existing_base_seed = existing.attrs.get('base_seed', np.nan)
+            existing_temperature_K = existing.attrs.get('temperature_K', np.nan)
         if isinstance(existing_mode, bytes):
             existing_mode = existing_mode.decode()
         if isinstance(existing_clear_mode, bytes):
@@ -2235,6 +2319,10 @@ def run_single_trial(
             existing_binning = float(existing_binning)
         except (TypeError, ValueError):
             existing_binning = np.nan
+        if isinstance(existing_population_model, bytes):
+            existing_population_model = existing_population_model.decode()
+        if isinstance(existing_population_sha256, bytes):
+            existing_population_sha256 = existing_population_sha256.decode()
         if existing_mode != exp_indep_charge_mode:
             raise RuntimeError(
                 f"{filename} was generated with exp_indep_charge_mode="
@@ -2292,6 +2380,35 @@ def run_single_trial(
                 "(NaN = pre-phase-split file). "
                 "Use a separate output directory or regenerate this file."
             )
+        if existing_population_model != population_model:
+            raise RuntimeError(
+                f"{filename} has population_model={existing_population_model!r}, "
+                f"not {population_model!r}. Use a separate output directory."
+            )
+        if population_model == 'esigma' and existing_population_sha256 != population_sha256:
+            raise RuntimeError(
+                f"{filename} has a different population-file hash. "
+                "Use a separate output directory or regenerate it."
+            )
+        try:
+            base_seed_matches = int(existing_base_seed) == int(base_seed)
+        except (TypeError, ValueError, OverflowError):
+            base_seed_matches = False
+        if not base_seed_matches:
+            raise RuntimeError(
+                f"{filename} has base_seed={existing_base_seed!r}, not {base_seed!r}."
+            )
+        try:
+            temperature_matches = np.isclose(
+                float(existing_temperature_K), float(temperature_K),
+                rtol=0.0, atol=1e-12,
+            )
+        except (TypeError, ValueError):
+            temperature_matches = False
+        if not temperature_matches:
+            raise RuntimeError(
+                f"{filename} has temperature_K={existing_temperature_K!r}, not {temperature_K!r}."
+            )
         return r
 
     CCDTest = CCD(
@@ -2312,6 +2429,15 @@ def run_single_trial(
         n_detected_traps=n_detected_traps,
         zero_exp_dep_rate=zero_exp_dep_rate,
         v3_phase_fraction=v3_phase_fraction,
+        population_model=population_model,
+        population_energy_edges=population_energy_edges,
+        population_log10_sigma_edges=population_log10_sigma_edges,
+        population_counts=population_counts,
+        population_file=population_file,
+        population_sha256=population_sha256,
+        temperature_K=temperature_K,
+        rng=population_rng,
+        image_rng=image_rng,
     )
 
     # Order of the full image sequence. With the fixed 0->4->6->10->20 ordering
@@ -2330,7 +2456,7 @@ def run_single_trial(
     # perturbing the global np.random / Numba streams used by the physics.
     n_cycles = 100
     do_shuffle = (exposure_order == 'shuffled')
-    shuffle_rng = np.random.default_rng(r)
+    shuffle_rng = np.random.default_rng(shuffle_ss)
     if clear_mode == 'binned_0h':
         # No hardware clear and no nominal 0 h slot. The real (long) exposures
         # are taken in 'shuffled' or fixed 'ordered' order, and a binned 0 h
@@ -2357,14 +2483,18 @@ def run_single_trial(
     # Memory Cleanup
     CCDTest.reconstructed_images = []
     CCDTest.no_trap_images = []
-    CCDTest.trap_bitmasks = []
-    CCDTest.notrap_bitmasks = []
+    CCDTest.trap_bitmasks = CompressedMaskList()
+    CCDTest.notrap_bitmasks = CompressedMaskList()
     CCDTest.ccd_state = []
 
     with h5py.File(filename, 'w') as f:
         f.create_dataset('exposures',         data=np.array(CCDTest.exposures))
         f.create_dataset('trap_taus',         data=CCDTest.trap_taus)
         f.create_dataset('trap_sigmas',       data=CCDTest.trap_sigmas)
+        f.create_dataset('trap_energies',      data=CCDTest.trap_energies)
+        f.create_dataset('trap_log10_sigmas',  data=CCDTest.trap_log10_sigmas)
+        f.create_dataset('trap_cell_energy_index', data=CCDTest.trap_cell_energy_index)
+        f.create_dataset('trap_cell_sigma_index', data=CCDTest.trap_cell_sigma_index)
         f.create_dataset('trap_is_v3',        data=CCDTest.trap_is_v3)
         f.create_dataset('trap_indices_rows', data=CCDTest.trap_indices[0].astype(np.int32))
         f.create_dataset('trap_indices_cols', data=CCDTest.trap_indices[1].astype(np.int32))
@@ -2389,6 +2519,16 @@ def run_single_trial(
         f.attrs['trap_density'] = CCDTest.trap_density
         f.attrs['trap_density_scale'] = CCDTest.trap_density_scale
         f.attrs['n_detected_traps'] = CCDTest.n_detected_traps
+        f.attrs['population_model'] = CCDTest.population_model
+        f.attrs['population_sampling_model'] = CCDTest.population_sampling_model
+        f.attrs['population_file'] = CCDTest.population_file
+        f.attrs['population_sha256'] = CCDTest.population_sha256
+        f.attrs['population_expected_quadrant_count'] = CCDTest.expected_quadrant_traps
+        f.attrs['population_realized_quadrant_count'] = len(CCDTest.trap_taus)
+        f.attrs['base_seed'] = int(base_seed)
+        f.attrs['trial_index'] = int(r)
+        f.attrs['legacy_numpy_seed'] = legacy_seed
+        f.attrs['numba_seed'] = numba_seed
         f.attrs['exp_dep_rate'] = CCDTest.exp_dep_rate
         f.attrs['zero_exp_dep_rate'] = CCDTest.zero_exp_dep_rate
         f.attrs['packet_volume_um3'] = CCDTest.packet_volume_um3
@@ -2431,7 +2571,7 @@ def run_single_trial(
         f.attrs['pairsfile'] = pairsfile
         f.attrs['flavor'] = (
             'minimal_caldet'
-            if 'minimal' in f"{tauhistfile} {pairsfile}".lower()
+            if 'minimal' in f"{population_file} {tauhistfile} {pairsfile}".lower()
             else 'legacy'
         )
         for group_name, stats in [('stats_trap', CCDTest.stats_trap), ('stats_notrap', CCDTest.stats_notrap)]:

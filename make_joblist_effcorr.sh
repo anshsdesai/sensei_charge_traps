@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Generate joblist_effcorr.txt for campaign_effcorr.sub: one line per
 # (scenario, charge-mode, trial-offset) chunk for the trap-only (zero
-# dark-current) BRACKET campaign (effcorr + upper populations).
+# dark-current) legacy-tau BRACKET campaign (effcorr + upper populations).
 #
 # Labels come straight from `run_campaign.py --list` with the SAME flags
 # run_one_effcorr.sh uses, so the job set always matches the real enumeration
@@ -30,7 +30,8 @@ VP_SCAN_FLAG=""
 
 : > joblist_effcorr.txt
 for mode in $MODES; do
-  python run_campaign.py --flavor "$FLAVOR" --populations effcorr upper --zero-exp-dep \
+  python run_campaign.py --flavor "$FLAVOR" --population-model legacy_tau \
+      --populations effcorr upper --zero-exp-dep \
       --binning-factors "$BINNING" $VP_SCAN_FLAG \
       --exp-indep-charge-mode "$mode" --list \
     | awk '/^(minos|snolab)_/{print $1}' \
