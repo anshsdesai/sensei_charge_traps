@@ -19,11 +19,13 @@ fi
 
 : > joblist_custom.txt
 for expdep in $EXP_DEP_CASES; do
-  zero_exp_dep=()
-  [ "$expdep" = zero_exp_dep ] && zero_exp_dep=(--zero-exp-dep)
+  # Older Bash versions combined with `set -u` treat an empty array expansion
+  # as an unset variable. Pass this optional flag as a scalar instead.
+  zero_exp_dep_flag=''
+  [ "$expdep" = zero_exp_dep ] && zero_exp_dep_flag='--zero-exp-dep'
   for mode in $MODES; do
     python run_custom_campaign.py --population-file "$POPULATION_FILE" \
-        "${zero_exp_dep[@]}" --exp-indep-charge-mode "$mode" --list \
+        $zero_exp_dep_flag --exp-indep-charge-mode "$mode" --list \
       | while read -r label; do
           off=0
           while [ "$off" -lt "$TOTAL" ]; do
