@@ -2487,7 +2487,12 @@ def run_single_trial(
     CCDTest.notrap_bitmasks = CompressedMaskList()
     CCDTest.ccd_state = []
 
-    with h5py.File(filename, 'w') as f:
+    # Write under a per-process temp name and atomically rename into place so
+    # a kill/crash mid-trial (OOM, preemption, node failure) never leaves a
+    # truncated/corrupt file at `filename` -- the name the resume logic
+    # (count_compatible_runs, the idempotency check above) actually globs for.
+    tmp_filename = f'{filename}.tmp{os.getpid()}'
+    with h5py.File(tmp_filename, 'w') as f:
         f.create_dataset('exposures',         data=np.array(CCDTest.exposures))
         f.create_dataset('trap_taus',         data=CCDTest.trap_taus)
         f.create_dataset('trap_sigmas',       data=CCDTest.trap_sigmas)
@@ -2582,4 +2587,5 @@ def run_single_trial(
                 cg.create_dataset('2e_counts',   data=np.array(d['2e_counts'],   dtype=np.int32))
                 cg.create_dataset('unmasked_pix',data=np.array(d['unmasked_pix'],dtype=np.int32))
 
+    os.replace(tmp_filename, filename)
     return r
