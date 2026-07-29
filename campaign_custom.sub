@@ -1,0 +1,19 @@
+# HTCondor submit for the custom physical E/sigma campaign.
+# Generate joblist_custom.txt with `bash make_joblist_custom.sh`, then submit:
+#   condor_submit campaign_custom.sub
+universe              = vanilla
+executable            = /bin/bash
+transfer_executable   = false
+should_transfer_files = NO
+initialdir            = /export/home/adesai/Projects/sensei_charge_traps
+arguments             = "run_one_custom.sh $(label) $(mode) $(expdep) $(offset) $(chunk)"
+
+output                = condor_logs/custom_$(expdep)_$(mode)_$(label)_$(offset).out
+error                 = condor_logs/custom_$(expdep)_$(mode)_$(label)_$(offset).err
+log                   = condor_logs/custom_campaign.log
+
+request_cpus          = 1
+request_memory        = 3000
+request_disk          = 100000
+
+queue label, mode, expdep, offset, chunk from joblist_custom.txt
