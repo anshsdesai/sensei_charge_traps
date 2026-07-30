@@ -2266,7 +2266,7 @@ def run_single_trial(
 
     os.makedirs(outdir, exist_ok=True)
 
-    filename = outdir + f'ccd_traps_run{r}.h5'
+    filename = os.path.join(outdir, f'ccd_traps_run{r}.h5')
     if os.path.exists(filename):
         with h5py.File(filename, 'r') as existing:
             existing_mode = existing.attrs.get(
