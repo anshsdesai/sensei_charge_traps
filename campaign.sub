@@ -21,4 +21,13 @@ request_cpus          = 1
 request_memory        = 3000
 request_disk          = 100000
 
+# Exclude hepatl33: its writes to the NFS home (hepatl30:/home) fail with
+# OSError errno 5 (EIO) at HDF5 close(), so trials die mid-chunk and leave
+# orphaned ccd_traps_run*.h5.tmp<pid> files. Clean until 2026-07-16, ~100%
+# failure by 07-28. It also acts as a black hole: a failed job dies in ~0.9 h
+# vs ~2.6 h for real work, so its slots free up ~3x faster and vacuum up the
+# queue -- in cluster 37272 it took 116/160 jobs and killed every one, while
+# all 44 jobs on hepatl31/32/34 succeeded. Remove once the node is repaired.
+requirements          = (Machine != "hepatl33.uoregon.edu")
+
 queue label, mode, offset, chunk from joblist.txt

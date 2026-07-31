@@ -16,4 +16,9 @@ request_cpus          = 1
 request_memory        = 3000
 request_disk          = 100000
 
+# Exclude hepatl33 -- see the note in campaign.sub. Broken NFS write path
+# (EIO at HDF5 close) plus black-hole scheduling; it consumed 116/160 jobs of
+# cluster 37272 and failed all of them. Remove once the node is repaired.
+requirements          = (Machine != "hepatl33.uoregon.edu")
+
 queue label, mode, expdep, offset, chunk from joblist_custom.txt
