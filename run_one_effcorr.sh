@@ -24,6 +24,12 @@ REPO="$HOME/Projects/sensei_charge_traps"
 
 source "$HOME/miniforge3/etc/profile.d/conda.sh"
 conda activate sensei_charge_traps
+
+# See run_one.sh: HDF5's flock() fails with BlockingIOError (errno 11) on the
+# NFS home. Safe to disable -- each trial writes its own file via
+# temp+atomic-rename, so there is no concurrent writer to guard against.
+export HDF5_USE_FILE_LOCKING=FALSE
+
 cd "$REPO"
 
 # --vp-scan always passed so the V_p band (vp3/vp10) is part of the enumeration

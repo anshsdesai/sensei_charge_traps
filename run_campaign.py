@@ -185,7 +185,15 @@ def count_compatible_runs(
     outdir, well_shift_overlap_factor, v3_phase_fraction, population_model,
     population_sha256, base_seed, temperature_K,
 ):
-    """Count existing HDF5 outputs compatible with the active transport model."""
+    """Count existing HDF5 outputs compatible with the active transport model.
+
+    Returns (compatible, problems) where each problem is
+    (filename, reason, kind) and kind is either 'metadata' (the file was read
+    and its attrs genuinely disagree with the active config) or 'unreadable'
+    (the file could not be opened at all, so nothing is known about it).
+    Callers must keep these apart: 'metadata' means the file is wrong and
+    should be regenerated, 'unreadable' does not.
+    """
     compatible = 0
     incompatible = []
     for filename in glob.glob(os.path.join(outdir, 'ccd_traps_run*.h5')):
@@ -204,7 +212,13 @@ def count_compatible_runs(
                 stored_base_seed = f.attrs.get('base_seed', np.nan)
                 stored_temperature_K = f.attrs.get('temperature_K', np.nan)
         except OSError as exc:
-            incompatible.append((filename, f'unreadable HDF5: {exc}'))
+            # BlockingIOError (errno 11) subclasses OSError and is what HDF5's
+            # flock() raises on an NFS mount under concurrent access or stale
+            # lock state. Such a file is very often perfectly valid and merely
+            # unopenable right now, so it must NOT be reported as incompatible
+            # metadata -- the caller's remedy for that is "delete/regenerate",
+            # which would destroy good data. Tag it as 'unreadable' instead.
+            incompatible.append((filename, f'unreadable HDF5: {exc}', 'unreadable'))
             continue
         try:
             factor = float(factor)
@@ -246,6 +260,7 @@ def count_compatible_runs(
                 f'{stored_population_model!r}, population_sha256='
                 f'{stored_population_sha256!r}, base_seed={stored_base_seed!r}, '
                 f'temperature_K={stored_temperature_K!r}',
+                'metadata',
             ))
     return compatible, incompatible
 
@@ -514,19 +529,42 @@ def main():
         return
 
     for label, cond, histfile, vp, scale, outdir, n_done, incompatible, clear_mode, exposure_order, binning, population_model, population_file in todo:
-        if incompatible:
+        mismatched = [p for p in incompatible if p[2] == 'metadata']
+        unreadable = [p for p in incompatible if p[2] == 'unreadable']
+        if mismatched:
             print(
-                f"\n!!! {label}: {len(incompatible)} existing HDF5 files have "
+                f"\n!!! {label}: {len(mismatched)} existing HDF5 files have "
                 f"incompatible trap transport metadata for model "
                 f"{EXPECTED_TRAP_TRANSPORT_MODEL!r}, well_shift_overlap_factor="
                 f"{args.well_shift_overlap_factor:g} and v3_phase_fraction="
                 f"{args.v3_phase_fraction:g}. Use a new --out_base or "
-                "delete/regenerate the incompatible files."
+                "delete/regenerate the incompatible files.",
+                file=sys.stderr,
             )
-            for filename, reason in incompatible[:5]:
-                print(f"    {filename}: {reason}")
-            if len(incompatible) > 5:
-                print(f"    ... and {len(incompatible) - 5} more")
+            for filename, reason, _ in mismatched[:5]:
+                print(f"    {filename}: {reason}", file=sys.stderr)
+            if len(mismatched) > 5:
+                print(f"    ... and {len(mismatched) - 5} more", file=sys.stderr)
+        if unreadable:
+            # Distinct from the block above: these files could not be opened,
+            # so their contents are unknown and they may well be valid. Do NOT
+            # suggest deleting them. On NFS this is almost always HDF5's
+            # flock() failing (BlockingIOError, errno 11).
+            print(
+                f"\n!!! {label}: {len(unreadable)} existing HDF5 files could not "
+                "be opened, so their compatibility is unknown. These files are "
+                "NOT known to be bad -- do not delete them. On an NFS mount this "
+                "is usually HDF5 file locking (BlockingIOError, errno 11); "
+                "re-run with HDF5_USE_FILE_LOCKING=FALSE in the environment, "
+                "which is safe here because each trial writes its own file via "
+                "a temp+atomic-rename and readers only ever see completed files.",
+                file=sys.stderr,
+            )
+            for filename, reason, _ in unreadable[:5]:
+                print(f"    {filename}: {reason}", file=sys.stderr)
+            if len(unreadable) > 5:
+                print(f"    ... and {len(unreadable) - 5} more", file=sys.stderr)
+        if incompatible:
             sys.exit(1)
         if not chunked and n_done >= args.num_runs:
             print(f"\n=== {label}: already complete, skipping ===")

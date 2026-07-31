@@ -15,6 +15,16 @@ REPO="$HOME/Projects/sensei_charge_traps"
 
 source "$HOME/miniforge3/etc/profile.d/conda.sh"
 conda activate sensei_charge_traps
+
+# $HOME here is an NFS mount (hepatl30:/home). HDF5 >=1.10 takes an flock() on
+# every file it opens, and on NFS those calls fail with BlockingIOError
+# (errno 11, "Resource temporarily unavailable") under concurrent access or
+# stale lock state -- which kills whole trial chunks and makes valid outputs
+# look unreadable. Disabling the lock is safe for this workload: each trial
+# writes its own uniquely-named file through a temp+atomic-rename, so no two
+# processes ever write the same file and readers only see completed files.
+export HDF5_USE_FILE_LOCKING=FALSE
+
 cd "$REPO"
 POPULATION_FILE=trap_population_esigma_minimal_caldet.npz
 if [ ! -f "$POPULATION_FILE" ]; then
