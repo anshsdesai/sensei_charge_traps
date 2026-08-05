@@ -68,7 +68,12 @@ CLEAR_LABELS = {
     'three_hour': 'clear3h',
     'binned_0h': 'bin0h',
 }
-EXPECTED_TRAP_TRANSPORT_MODEL = 'phase_limited_v1v3'
+# Must match ccd_simulation.TRAP_TRANSPORT_MODEL (ccd_simulation.py:19), which is
+# what run_single_trial stamps into every output file's attrs. Kept as a literal
+# rather than imported so the campaign preflight does not have to import numba.
+# If the two ever disagree the guard below rejects the campaign's own fresh
+# output as incompatible metadata and every chunk after the first exits 1.
+EXPECTED_TRAP_TRANSPORT_MODEL = 'phase_resolved_v1v3_srh_v2'
 
 
 def build_scenarios(populations=('baseline', 'upper'), vp_values=VP_ORDER):
@@ -157,7 +162,7 @@ def order_binning_pairs_for(clear_mode, vp, policy, factors):
     Binned variants are emitted at every V_p (not just the central one) so the
     V_p systematic band under --vp-scan brackets the binned result on both edges
     (vp3 and vp10 as well as the central vp1). This matters under the
-    phase_limited_v1v3 transport model, where single-e capture no longer
+    phase_resolved_v1v3_srh_v2 transport model, where single-e capture no longer
     saturates, so the result does depend on V_p (unlike the old full-row
     model, where V_p barely moved anything and binned was run only at the
     central V_p). Binning only divides the per-row readout dwell
@@ -377,7 +382,7 @@ def main():
              "32x1-binned variant; binned variants are emitted for the sequencer "
              "and three_hour clears at every V_p, in BOTH exposure orders "
              "(unconditionally, regardless of --exposure-order-policy), and get "
-             "a '_bin<f>' label suffix. Under phase_limited_v1v3 binning shortens "
+             "a '_bin<f>' label suffix. Under phase_resolved_v1v3_srh_v2 binning shortens "
              "the emission window but leaves the fixed V1/V3 capture window "
              "unchanged.",
     )

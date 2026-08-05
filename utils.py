@@ -2,6 +2,7 @@ from astropy.io import fits
 import numpy as np
 import matplotlib.pyplot as plt
 import glob
+import os
 import re
 from scipy import ndimage
 
@@ -435,3 +436,266 @@ def load_spectra_hdf5(filename='dipole_spectra.h5'):
                 dp = (int(x), int(y))
                 spectra_dict[quad][dp] = _load_dict_from_hdf5(dp_grp)
     return spectra_dict
+
+
+# ---------------------------------------------------------------------------
+# Fit-catalog aggregation + fast caches
+#
+# load_spectra_hdf5 (above) reads every per-temperature 'seconds'/'intensities'
+# array for every dipole via _load_dict_from_hdf5 -- across ~9000+ dipoles x 23
+# temperatures this is what makes loading a fit_dipole_spectra*.h5 catalog take
+# ~2.5 minutes, even though every downstream consumer immediately discards most
+# of it via its own WellBehavedTrap/GoodEnergyFit filtering. run_charge_traps.py
+# already pays that cost once to have fit_dipole_spectra in hand; the functions
+# below reduce it there, in one pass, to three small artifacts that a notebook
+# can load directly without ever calling load_spectra_hdf5 itself.
+# ---------------------------------------------------------------------------
+
+MEASUREMENT_TEMPERATURES = [
+    125, 130, 135, 140, 145, 150, 155, 160, 165, 170, 175, 180,
+    183, 185, 187, 190, 193, 195, 197, 200, 203, 207, 210,
+]
+
+
+def aggregate_trap_fits(fit_dipole_spectra, log_energy_cross_section,
+                        measurement_temperatures=None, quads=(0, 1, 2, 3)):
+    """Reduce the fit catalog to the arrays the figures consume.
+
+    ``log_energy_cross_section`` is passed explicitly (rather than imported at
+    module level) because this module doesn't own a flavor choice between
+    dipole.py and dipole_new.py -- callers resolve that themselves.
+
+    Returns a dict with:
+      - ``energy_crossSections``: list of (sigma, E, sigma_err, E_err, avg_good_temp)
+      - ``energy_covariances``: parallel list of the 2x2 [E, logsigma] fit
+        covariance per good trap (or None if unavailable); same order/length as
+        ``energy_crossSections``. Used to draw the correlated (E, sigma)
+        uncertainty and the covariance-propagated tau(T) band.
+      - ``tau_temp_fits``: list of [temps, taus, tau_errs] per good trap
+      - ``tau_temperatures``: {T: {'measured': [...], 'extrapolated': [...]}}
+      - ``cross_sections`` / ``energies``: arrays from energy_crossSections
+      - ``maxtaus``: per-trap max measured tau
+    """
+    if measurement_temperatures is None:
+        measurement_temperatures = MEASUREMENT_TEMPERATURES
+
+    energy_crossSections = []
+    energy_covariances = []
+    tau_temp_fits = []
+    maxtaus = []
+    tau_temperatures = {t: {'measured': [], 'extrapolated': []}
+                        for t in measurement_temperatures}
+
+    for q in quads:
+        if q not in fit_dipole_spectra:
+            continue
+        for dp in list(fit_dipole_spectra[q]):
+            if not isinstance(dp, tuple):
+                continue
+            testdp = fit_dipole_spectra[q][dp]
+            # Minimal pipeline (dipole_new.py) only writes 'EnergyFitFailed' when
+            # WellBehavedTrap AND single_orientation; a missing key means no energy
+            # fit was attempted, which is equivalent to a failed fit.
+            if not (testdp['WellBehavedTrap'] and not testdp.get('EnergyFitFailed', True)):
+                continue
+
+            maxtaus.append(np.max(testdp['energy_taus']))
+
+            if not testdp["GoodEnergyFit"]:
+                continue
+
+            cs = testdp['energy_BestFitCrossSection']
+            cserr = testdp['energy_BestFitCrossSectionErr']
+            e = testdp['energy_BestFitEnergy']
+            e_err = testdp['energy_BestFitEnergyErr']
+            avg_good_temp = np.mean(testdp['energy_temperatures'])
+
+            for t in measurement_temperatures:
+                tau = np.exp(log_energy_cross_section(t, e, np.log(cs)))
+                if t in testdp['energy_temperatures']:
+                    tau_temperatures[t]['measured'].append(tau)
+                else:
+                    tau_temperatures[t]['extrapolated'].append(tau)
+
+            energy_crossSections.append((cs, e, cserr, e_err, avg_good_temp))
+            # 2x2 [E, logsigma] covariance from the Arrhenius fit (popt order),
+            # as stored by dipole(_new).py. None if this catalog predates it.
+            cov = testdp.get('energy_CovarianceMatrix')
+            energy_covariances.append(np.array(cov, dtype=float)
+                                      if cov is not None else None)
+            tau_temp_fits.append([testdp['energy_temperatures'],
+                                  testdp['energy_taus'],
+                                  testdp['energy_tau_errs']])
+
+    energy_crossSections_arr = np.array(energy_crossSections)
+    cross_sections = energy_crossSections_arr[:, 0] if len(energy_crossSections) else np.array([])
+    energies = energy_crossSections_arr[:, 1] if len(energy_crossSections) else np.array([])
+
+    print(f"Number of good energy fits: {len(energy_crossSections)}")
+    return {
+        'energy_crossSections': energy_crossSections,
+        'energy_covariances': energy_covariances,
+        'tau_temp_fits': tau_temp_fits,
+        'tau_temperatures': tau_temperatures,
+        'cross_sections': cross_sections,
+        'energies': energies,
+        'maxtaus': maxtaus,
+    }
+
+
+def agg_cache_path(fit_source):
+    """Derive the aggregate-cache filename from a fit_dipole_spectra*.h5 path."""
+    return os.path.splitext(fit_source)[0] + '_agg.npz'
+
+
+def amp_cache_path(fit_source):
+    """Derive the amplitude-vs-temperature cache filename from a fit_dipole_spectra*.h5 path."""
+    return os.path.splitext(fit_source)[0] + '_amp_by_temp.h5'
+
+
+def example_cache_path(fit_source):
+    """Derive the example-traps cache filename from a fit_dipole_spectra*.h5 path."""
+    return os.path.splitext(fit_source)[0] + '_example_traps.h5'
+
+
+def save_trap_fit_aggregate(agg, path):
+    """Cache aggregate_trap_fits' output. agg's fields are ragged (variable-length
+    per-trap arrays) and contain None entries (missing covariances), so it's
+    pickled inside the npz rather than stored as plain arrays -- matching this
+    repo's existing allow_pickle=True npz convention (e.g. mc_dist*.npz)."""
+    np.savez(path, agg=np.array(agg, dtype=object))
+
+
+def load_trap_fit_aggregate(path):
+    """Load a cache written by save_trap_fit_aggregate."""
+    return np.load(path, allow_pickle=True)['agg'].item()
+
+
+def build_fit_catalog_caches(fit_dipole_spectra, log_energy_cross_section,
+                             measurement_temperatures=None, quads=(0, 1, 2, 3),
+                             num_example_traps=75):
+    """Reduce an in-memory fit_dipole_spectra dict (as returned by
+    load_spectra_hdf5 / dp.fitTrapIntensity) to three artifacts in a single pass
+    -- the same walk aggregate_trap_fits already does, plus two more schema-
+    compatible reductions collected along the way:
+
+      - ``agg``: identical to aggregate_trap_fits' return value.
+      - ``amp_by_temp``: {quad: {(row, col): {'WellBehavedTrap': True,
+        <temp>: {'fit_coeff', 'fit_coeff_err', 'GoodIntensityFit'}, ...}}} for
+        every WellBehavedTrap dipole (regardless of energy-fit outcome) --
+        schema-compatible with fit_dipole_spectra, so
+        plot_amplitude_vs_temperature can consume it unmodified.
+      - ``example_traps``: same schema, keeping the full per-temperature curve
+        data ('seconds', 'intensities', 'fit_coeff', 'fit_tau', 'fit_offset',
+        error fields) for only the first ``num_example_traps`` traps meeting
+        plot_example_traps' own gate (WellBehavedTrap, not EnergyFitFailed,
+        GoodEnergyFit) -- schema-compatible, so plot_example_traps can consume
+        it unmodified.
+
+    Caching these three (rather than reloading the full catalog each time) is
+    the point: load_spectra_hdf5 materializes every per-temperature 'seconds'/
+    'intensities' array for every dipole -- ~9000+ dipoles x 23 temperatures --
+    which is what makes loading a fit_dipole_spectra*.h5 catalog take ~2.5
+    minutes; a downstream notebook that only needs these three small
+    reductions never has to pay that cost again once run_charge_traps.py has
+    written them (it already pays it once, to have fit_dipole_spectra in hand
+    at all).
+    """
+    if measurement_temperatures is None:
+        measurement_temperatures = MEASUREMENT_TEMPERATURES
+
+    energy_crossSections = []
+    energy_covariances = []
+    tau_temp_fits = []
+    maxtaus = []
+    tau_temperatures = {t: {'measured': [], 'extrapolated': []}
+                        for t in measurement_temperatures}
+
+    amp_by_temp = {q: {} for q in quads}
+    example_traps = {q: {} for q in quads}
+    num_examples_kept = 0
+
+    for q in quads:
+        if q not in fit_dipole_spectra:
+            continue
+        for dp in list(fit_dipole_spectra[q]):
+            if not isinstance(dp, tuple):
+                continue
+            testdp = fit_dipole_spectra[q][dp]
+
+            well_behaved = bool(testdp.get('WellBehavedTrap', False))
+            if well_behaved:
+                temp_entry = {'WellBehavedTrap': True}
+                for key, data in testdp.items():
+                    if isinstance(key, int) and data.get('GoodIntensityFit', False):
+                        temp_entry[key] = {
+                            'fit_coeff': data['fit_coeff'],
+                            'fit_coeff_err': data['fit_coeff_err'],
+                            'GoodIntensityFit': True,
+                        }
+                amp_by_temp[q][dp] = temp_entry
+
+            # Minimal pipeline (dipole_new.py) only writes 'EnergyFitFailed' when
+            # WellBehavedTrap AND single_orientation; a missing key means no energy
+            # fit was attempted, which is equivalent to a failed fit.
+            if not (well_behaved and not testdp.get('EnergyFitFailed', True)):
+                continue
+
+            maxtaus.append(np.max(testdp['energy_taus']))
+
+            if not testdp["GoodEnergyFit"]:
+                continue
+
+            if num_examples_kept < num_example_traps:
+                example_traps[q][dp] = testdp
+                num_examples_kept += 1
+
+            cs = testdp['energy_BestFitCrossSection']
+            cserr = testdp['energy_BestFitCrossSectionErr']
+            e = testdp['energy_BestFitEnergy']
+            e_err = testdp['energy_BestFitEnergyErr']
+            avg_good_temp = np.mean(testdp['energy_temperatures'])
+
+            for t in measurement_temperatures:
+                tau = np.exp(log_energy_cross_section(t, e, np.log(cs)))
+                if t in testdp['energy_temperatures']:
+                    tau_temperatures[t]['measured'].append(tau)
+                else:
+                    tau_temperatures[t]['extrapolated'].append(tau)
+
+            energy_crossSections.append((cs, e, cserr, e_err, avg_good_temp))
+            cov = testdp.get('energy_CovarianceMatrix')
+            energy_covariances.append(np.array(cov, dtype=float)
+                                      if cov is not None else None)
+            tau_temp_fits.append([testdp['energy_temperatures'],
+                                  testdp['energy_taus'],
+                                  testdp['energy_tau_errs']])
+
+    energy_crossSections_arr = np.array(energy_crossSections)
+    cross_sections = energy_crossSections_arr[:, 0] if len(energy_crossSections) else np.array([])
+    energies = energy_crossSections_arr[:, 1] if len(energy_crossSections) else np.array([])
+
+    print(f"Number of good energy fits: {len(energy_crossSections)}")
+    agg = {
+        'energy_crossSections': energy_crossSections,
+        'energy_covariances': energy_covariances,
+        'tau_temp_fits': tau_temp_fits,
+        'tau_temperatures': tau_temperatures,
+        'cross_sections': cross_sections,
+        'energies': energies,
+        'maxtaus': maxtaus,
+    }
+    return agg, amp_by_temp, example_traps
+
+
+def build_and_save_fit_catalog_caches(fit_dipole_spectra, fit_source, log_energy_cross_section,
+                                      **kwargs):
+    """Build the three fit-catalog caches (see build_fit_catalog_caches) from an
+    already-loaded ``fit_dipole_spectra`` dict and write them alongside
+    ``fit_source`` (used only to derive the cache filenames)."""
+    agg, amp_by_temp, example_traps = build_fit_catalog_caches(
+        fit_dipole_spectra, log_energy_cross_section, **kwargs)
+    save_trap_fit_aggregate(agg, agg_cache_path(fit_source))
+    save_spectra_hdf5(amp_by_temp, amp_cache_path(fit_source))
+    save_spectra_hdf5(example_traps, example_cache_path(fit_source))
+    return agg, amp_by_temp, example_traps

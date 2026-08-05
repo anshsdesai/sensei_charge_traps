@@ -16,7 +16,7 @@ from trap_population import systematic_cell_sample, SAMPLING_MODEL as ESIGMA_SAM
 # fallback for callers that don't pass an explicit count or a coord-list file;
 # the campaign and run_ccd_simulation always derive the true count from disk.
 DEFAULT_N_DETECTED_TRAPS = 5171
-TRAP_TRANSPORT_MODEL = 'phase_limited_v1v3'
+TRAP_TRANSPORT_MODEL = 'phase_resolved_v1v3_srh_v2'
 
 # These inputs are fixed for every image in a worker. Keeping them at module
 # scope also lets forked simulation workers build their own cache without any
@@ -792,6 +792,49 @@ def seed_numba(seed_value):
     """Seeds Numba's internal PRNG. Must be called from inside a JIT function."""
     np.random.seed(seed_value)
 
+
+@njit
+def _crossing_srh_update(packet_charge, occupied, capture_alpha, emission_beta):
+    """Exact two-state SRH update while one packet crosses one edge trap.
+
+    ``capture_alpha`` is the per-carrier integrated capture rate
+    ``sigma*v_th*t_cross/V`` and ``emission_beta`` is ``t_cross/tau``.  The
+    total carrier count shared by packet and trap is conserved.  Using the
+    exact end-state transition includes arbitrarily many capture/emission
+    cycles during the crossing and is therefore well behaved even for
+    ``tau <= t_cross``.
+    """
+    is_occupied = occupied > 0.0
+    total_charge = packet_charge + (1.0 if is_occupied else 0.0)
+    if total_charge < 1.0:
+        return packet_charge, occupied
+
+    capture_rate_dt = total_charge * capture_alpha
+    total_rate_dt = capture_rate_dt + emission_beta
+    if total_rate_dt <= 0.0:
+        return packet_charge, occupied
+
+    transition_factor = -np.expm1(-total_rate_dt)
+    if is_occupied:
+        p_empty = emission_beta / total_rate_dt * transition_factor
+        if np.random.random() < p_empty:
+            return packet_charge + 1.0, 0.0
+    else:
+        p_occupied = capture_rate_dt / total_rate_dt * transition_factor
+        if np.random.random() < p_occupied:
+            return packet_charge - 1.0, 1.0
+    return packet_charge, occupied
+
+
+@njit
+def _emit_into_hold_pixel(padded_image, packet_row, packet_col,
+                          emit_probability, trapped_charge, trap_index):
+    """Apply emission during a stationary V2 hold interval."""
+    if trapped_charge[trap_index] > 0.0:
+        if np.random.random() < emit_probability:
+            padded_image[packet_row, packet_col] += 1.0
+            trapped_charge[trap_index] = 0.0
+
 @njit
 def fast_readout_numba(
     image,
@@ -799,7 +842,9 @@ def fast_readout_numba(
     tpix_vertical,
     trap_rows,
     trap_cols,
-    trap_emit_probs,
+    trap_rest_emit_probs,
+    trap_pre_readout_emit_probs,
+    trap_cross_emission_beta,
     trap_capture_alpha,
     trap_is_v3,
     trapped_charge,
@@ -807,20 +852,19 @@ def fast_readout_numba(
     """
     JIT-compiled C-speed readout loop using a stationary padded buffer.
 
-    Phase-limited V1/V3 trap transport: emission is allowed across the full row
-    dwell, while capture and recapture are allowed only during one short phase
-    overlap window. ``trap_emit_probs`` is 1-exp(-t_row/tau), and
-    ``trap_capture_alpha`` is kc*t_phase, so P_capture(q) = 1-exp(-q*alpha).
+    Phase-resolved V1/V3 transport.  During a vertical shift a V3/down-edge
+    trap sees the packet leaving its own pixel, whereas a V1/up-edge trap sees
+    the packet entering its pixel.  Their short crossing uses the exact
+    two-state SRH transition.  During the following row dwell both phase types
+    can emit into the V2 hold well of their own pixel, but cannot capture there.
 
-    ``trap_is_v3`` splits the catalog by clock phase. A V3 trap is crossed by
-    the packet on its way OUT of the row, after collecting the dwell's
-    emission, so its own emitted carrier faces a same-step recapture roll. A
-    V1 trap is crossed on the way IN: capture is checked on the arriving
-    packet before the dwell's emission, and an emitted carrier exits over V3
-    without recrossing the trap — it always escapes.
+    ``trap_pre_readout_emit_probs`` represents the serial flush between the
+    nominal exposure and first vertical shift (1.22 s for the operative DAQ
+    sequence).  A pre-readout V3 emission remains in its own hold well and
+    therefore crosses that same V3 trap on the first shift.
     """
     rows, cols = image.shape
-    n_traps = len(trap_emit_probs)
+    n_traps = len(trap_rest_emit_probs)
 
     # 1. Pad image with empty rows at the top to simulate empty space shifting in
     padded_image = np.zeros((2 * rows, cols), dtype=np.float64)
@@ -831,50 +875,71 @@ def fast_readout_numba(
     output_stream = np.zeros(rows * cols, dtype=np.float64)
     out_idx = 0
 
+    # The DAQ performs a stationary serial flush before the first vertical
+    # shift.  Emission during it joins the trap's own V2 hold well.
+    for i in range(n_traps):
+        _emit_into_hold_pixel(
+            padded_image,
+            trap_rows[i] + rows,
+            trap_cols[i],
+            trap_pre_readout_emit_probs[i],
+            trapped_charge,
+            i,
+        )
+
     for t in range(rows):
-        # 2. Readout the row that has reached the bottom
+        # 2. The packet crosses the down edge of its current pixel and then the
+        # up edge of the next pixel.  V3/down-edge and V1/up-edge traps must
+        # therefore use different packet indices.
+        for i in range(n_traps):
+            if trap_is_v3[i] != 1:
+                continue
+            tr = trap_rows[i]
+            tc = trap_cols[i]
+            packet_row = tr + rows - t
+            q, occ = _crossing_srh_update(
+                padded_image[packet_row, tc],
+                trapped_charge[i],
+                trap_capture_alpha[i],
+                trap_cross_emission_beta[i],
+            )
+            padded_image[packet_row, tc] = q
+            trapped_charge[i] = occ
+
+        for i in range(n_traps):
+            if trap_is_v3[i] == 1:
+                continue
+            tr = trap_rows[i]
+            tc = trap_cols[i]
+            packet_row = tr + rows - 1 - t
+            q, occ = _crossing_srh_update(
+                padded_image[packet_row, tc],
+                trapped_charge[i],
+                trap_capture_alpha[i],
+                trap_cross_emission_beta[i],
+            )
+            padded_image[packet_row, tc] = q
+            trapped_charge[i] = occ
+
+        # 3. The bottom packet has now crossed its exit edge and reaches the
+        # serial register.
         read_row = 2 * rows - 1 - t
         for c in range(cols - 1, -1, -1):
             output_stream[out_idx] = padded_image[read_row, c]
             out_idx += 1
 
-        # 3. Trap interactions on the newly shifted pixels
+        # 4. During serial readout all parallel charge rests under V2.  An
+        # occupied edge trap may emit into its own hold pixel; capture waits
+        # until the next vertical shift.
         for i in range(n_traps):
-            tr = trap_rows[i]
-            tc = trap_cols[i]
-
-            # The pixel that just shifted into the trap's physical row 'tr'
-            current_pixel_row = tr + rows - 1 - t
-
-            if trap_is_v3[i] == 1:
-                # V3: emit over the dwell, then one capture/recapture check as
-                # the packet (incl. any just-emitted carrier) crosses on exit.
-                if trapped_charge[i] > 0.0:
-                    if np.random.random() < trap_emit_probs[i]:
-                        padded_image[current_pixel_row, tc] += 1.0
-                        trapped_charge[i] = 0.0
-
-                q = padded_image[current_pixel_row, tc]
-                if trapped_charge[i] <= 0.0 and q >= 1.0:
-                    p_capture = 1.0 - np.exp(-q * trap_capture_alpha[i])
-                    if np.random.random() < p_capture:
-                        padded_image[current_pixel_row, tc] -= 1.0
-                        trapped_charge[i] = 1.0
-            else:
-                # V1: capture is checked on the arriving packet first; an
-                # emission during the dwell then escapes with no same-step
-                # recapture (the packet exits over V3, never recrossing V1).
-                q = padded_image[current_pixel_row, tc]
-                if trapped_charge[i] <= 0.0 and q >= 1.0:
-                    p_capture = 1.0 - np.exp(-q * trap_capture_alpha[i])
-                    if np.random.random() < p_capture:
-                        padded_image[current_pixel_row, tc] -= 1.0
-                        trapped_charge[i] = 1.0
-
-                if trapped_charge[i] > 0.0:
-                    if np.random.random() < trap_emit_probs[i]:
-                        padded_image[current_pixel_row, tc] += 1.0
-                        trapped_charge[i] = 0.0
+            _emit_into_hold_pixel(
+                padded_image,
+                trap_rows[i] + rows - 1 - t,
+                trap_cols[i],
+                trap_rest_emit_probs[i],
+                trapped_charge,
+                i,
+            )
 
     # 4. Update Exposure Accumulator
     # (Vectorized the O(R^2 * C) addition loop into O(R * C))
@@ -901,8 +966,9 @@ def fast_clear_numba(
     slow_dwell,
     trap_rows,
     trap_cols,
-    trap_emit_probs_fast,
-    trap_emit_probs_slow,
+    trap_rest_emit_probs_fast,
+    trap_rest_emit_probs_slow,
+    trap_cross_emission_beta,
     trap_capture_alpha,
     trap_is_v3,
     trapped_charge,
@@ -910,11 +976,10 @@ def fast_clear_numba(
     """
     Clock the active area through the two-block clear recipe.
 
-    Clear transport uses the same phase-limited V1/V3 model as readout. Capture
-    is limited to the short phase-overlap dwell for every vertical shift; the
-    emission probability is set by the full fast or slow clear dwell. The
-    per-trap phase split matches ``fast_readout_numba``: V3 traps get a
-    same-step recapture check on their own emission, V1 traps do not.
+    Clear transport uses the same phase-resolved packet geometry and exact
+    crossing SRH update as science readout.  The clear dwell includes its
+    vertical waveform, so the stationary emission probabilities exclude the
+    short crossing interval handled by the coupled update.
     """
     rows, cols = image.shape
     n_traps = len(trap_capture_alpha)
@@ -929,39 +994,46 @@ def fast_clear_numba(
             padded_image[r + total_shifts, c] = image[r, c]
 
     for t in range(total_shifts):
-        emit_probs = trap_emit_probs_fast if t < fast_shifts else trap_emit_probs_slow
+        rest_emit_probs = (
+            trap_rest_emit_probs_fast if t < fast_shifts
+            else trap_rest_emit_probs_slow
+        )
 
         for i in range(n_traps):
+            if trap_is_v3[i] != 1:
+                continue
             tr = trap_rows[i]
             tc = trap_cols[i]
+            packet_row = tr + total_shifts - t
+            q, occ = _crossing_srh_update(
+                padded_image[packet_row, tc], trapped_charge[i],
+                trap_capture_alpha[i], trap_cross_emission_beta[i],
+            )
+            padded_image[packet_row, tc] = q
+            trapped_charge[i] = occ
 
-            # Packet shifted into physical trap row tr on this clear step.
-            current_pixel_row = tr + total_shifts - 1 - t
-
+        for i in range(n_traps):
             if trap_is_v3[i] == 1:
-                if trapped_charge[i] > 0.0:
-                    if np.random.random() < emit_probs[i]:
-                        padded_image[current_pixel_row, tc] += 1.0
-                        trapped_charge[i] = 0.0
+                continue
+            tr = trap_rows[i]
+            tc = trap_cols[i]
+            packet_row = tr + total_shifts - 1 - t
+            q, occ = _crossing_srh_update(
+                padded_image[packet_row, tc], trapped_charge[i],
+                trap_capture_alpha[i], trap_cross_emission_beta[i],
+            )
+            padded_image[packet_row, tc] = q
+            trapped_charge[i] = occ
 
-                q = padded_image[current_pixel_row, tc]
-                if trapped_charge[i] <= 0.0 and q >= 1.0:
-                    p_capture = 1.0 - np.exp(-q * trap_capture_alpha[i])
-                    if np.random.random() < p_capture:
-                        padded_image[current_pixel_row, tc] -= 1.0
-                        trapped_charge[i] = 1.0
-            else:
-                q = padded_image[current_pixel_row, tc]
-                if trapped_charge[i] <= 0.0 and q >= 1.0:
-                    p_capture = 1.0 - np.exp(-q * trap_capture_alpha[i])
-                    if np.random.random() < p_capture:
-                        padded_image[current_pixel_row, tc] -= 1.0
-                        trapped_charge[i] = 1.0
-
-                if trapped_charge[i] > 0.0:
-                    if np.random.random() < emit_probs[i]:
-                        padded_image[current_pixel_row, tc] += 1.0
-                        trapped_charge[i] = 0.0
+        for i in range(n_traps):
+            _emit_into_hold_pixel(
+                padded_image,
+                trap_rows[i] + total_shifts - 1 - t,
+                trap_cols[i],
+                rest_emit_probs[i],
+                trapped_charge,
+                i,
+            )
 
     # Charge still resident in the active area immediately after the final
     # shift. CCD.simulate_clear records it, then the clear boundary discards
@@ -972,8 +1044,9 @@ def fast_clear_numba(
 
 
 @njit
-def drain_traps_empty_numba(trap_taus, trap_capture_alpha, trap_is_v3,
-                            trapped_charge, dwell, n_shifts):
+def drain_traps_empty_numba(trap_taus, trap_capture_alpha,
+                            trap_cross_emission_beta, trap_is_v3,
+                            trapped_charge, dwell, crossing_dwell, n_shifts):
     """
     Drain traps through the empty-packet tail of a continuous clear.
 
@@ -985,16 +1058,42 @@ def drain_traps_empty_numba(trap_taus, trap_capture_alpha, trap_is_v3,
     escape is a thinned Poisson process with rate exp(-alpha)/tau, giving
     P_drain = 1-exp(-T*exp(-alpha)/tau).
     """
-    total_dwell = dwell * n_shifts
+    rest_dwell = max(dwell - crossing_dwell, 0.0)
     n_traps = len(trap_taus)
     for i in range(n_traps):
         if trapped_charge[i] > 0.0:
-            if trap_is_v3[i] == 1:
-                escape_rate = np.exp(-trap_capture_alpha[i]) / trap_taus[i]
+            p_rest_emit = -np.expm1(-rest_dwell / trap_taus[i])
+            alpha = trap_capture_alpha[i]
+            beta = trap_cross_emission_beta[i]
+            rate_dt = alpha + beta  # one conserved carrier in trap+packet
+            if rate_dt > 0.0:
+                transition = -np.expm1(-rate_dt)
+                p_cross_empty_from_occupied = beta / rate_dt * transition
+                p_cross_occupied_from_empty = alpha / rate_dt * transition
             else:
-                escape_rate = 1.0 / trap_taus[i]
-            p_emit = 1.0 - np.exp(-total_dwell * escape_rate)
-            if np.random.random() < p_emit:
+                p_cross_empty_from_occupied = 0.0
+                p_cross_occupied_from_empty = 0.0
+
+            if trap_is_v3[i] == 1:
+                # Rest emission enters the upstream hold well and then crosses
+                # this same V3 edge.  If no rest emission occurred, emission may
+                # still occur during the crossing itself.
+                p_escape_one_shift = (
+                    (1.0 - p_rest_emit) * p_cross_empty_from_occupied
+                    + p_rest_emit * (1.0 - p_cross_occupied_from_empty)
+                )
+            else:
+                # V1 is crossed first; any trap still occupied afterwards may
+                # emit into the downstream hold well during the rest dwell.
+                p_escape_one_shift = (
+                    p_cross_empty_from_occupied
+                    + (1.0 - p_cross_empty_from_occupied) * p_rest_emit
+                )
+
+            p_escape = -np.expm1(
+                n_shifts * np.log1p(-min(max(p_escape_one_shift, 0.0), 1.0))
+            ) if p_escape_one_shift < 1.0 else 1.0
+            if np.random.random() < p_escape:
                 trapped_charge[i] = 0.0
 
 
@@ -1121,6 +1220,22 @@ class CCD:
         )
         self.readout_capture_dwell_s = self.readout_capture_ticks / self.clear_clock_hz
         self.clear_capture_dwell_s = self.clear_capture_ticks / self.clear_clock_hz
+        # After EXPOSURE (including EXPOSURE=0), exposeseq executes 10,000
+        # horizontal_step recipes before its first vertical shift.  Parallel
+        # charge remains parked under V2 throughout this 1.22 s serial flush.
+        self.readout_delay_horizontal_ticks = 300
+        self.readout_delay_switch_ticks = 15
+        self.readout_delay_reset_gate_ticks = 15
+        self.pre_readout_horizontal_steps = 10000
+        readout_horizontal_step_ticks = (
+            self.readout_delay_switch_ticks
+            + self.clear_horizontal_phase_count * self.readout_delay_horizontal_ticks
+            + self.readout_delay_reset_gate_ticks
+        )
+        self.pre_readout_dwell_s = (
+            self.pre_readout_horizontal_steps * readout_horizontal_step_ticks
+            / self.clear_clock_hz
+        )
         self.clear_delay_switch_ticks = 8
         self.clear_delay_reset_gate_ticks = 15
         self.clear_fast_shifts = 1500
@@ -1310,6 +1425,12 @@ class CCD:
         # vertical dwells, so they get separate capture windows / alphas.
         self.trap_capture_alpha_readout = self.trap_kc * self.readout_capture_dwell_s
         self.trap_capture_alpha_clear = self.trap_kc * self.clear_capture_dwell_s
+        self.trap_cross_emission_beta_readout = (
+            self.readout_capture_dwell_s / self.trap_taus
+        )
+        self.trap_cross_emission_beta_clear = (
+            self.clear_capture_dwell_s / self.trap_taus
+        )
         # Per-trap clock-phase assignment. Pumping cannot distinguish V1 from
         # V3, but transport can: a V3 trap is crossed by the packet on row
         # EXIT (its own emission gets a same-step recapture roll), a V1 trap
@@ -1324,9 +1445,22 @@ class CCD:
         self.trap_is_v3 = (
             rng.random(num_traps) < self.v3_phase_fraction
         ).astype(np.uint8)
-        self.readout_emit_probs = 1.0 - np.exp(-self.tpix_vertical / self.trap_taus)
-        self.clear_fast_emit_probs = 1.0 - np.exp(-self.clear_fast_dwell_s / self.trap_taus)
-        self.clear_slow_emit_probs = 1.0 - np.exp(-self.clear_slow_dwell_s / self.trap_taus)
+        self.readout_rest_emit_probs = -np.expm1(-self.tpix_vertical / self.trap_taus)
+        self.pre_readout_emit_probs = -np.expm1(
+            -self.pre_readout_dwell_s / self.trap_taus
+        )
+        self.clear_fast_rest_dwell_s = max(
+            self.clear_fast_dwell_s - self.clear_capture_dwell_s, 0.0
+        )
+        self.clear_slow_rest_dwell_s = max(
+            self.clear_slow_dwell_s - self.clear_capture_dwell_s, 0.0
+        )
+        self.clear_fast_rest_emit_probs = -np.expm1(
+            -self.clear_fast_rest_dwell_s / self.trap_taus
+        )
+        self.clear_slow_rest_emit_probs = -np.expm1(
+            -self.clear_slow_rest_dwell_s / self.trap_taus
+        )
 
         # Store trapped charge as a 1D array (much faster than 2D)
         self.trapped_charge_1d = np.zeros(num_traps, dtype=float)
@@ -1420,9 +1554,9 @@ class CCD:
                 or np.any(self.trapped_charge_1d > 0)
             )
         ):
-            # Transport resident image charge out with phase-limited V1/V3
-            # capture and full-dwell emission. For 'three_hour' this is the
-            # image-flush phase; the pure-emission empty tail follows below.
+            # Transport resident image charge out with phase-resolved V1/V3
+            # crossing kinetics. For 'three_hour' this is the image-flush
+            # phase; the empty-packet drain follows below.
             fast_clear_numba(
                 self.ccd_state,
                 self.clear_fast_shifts,
@@ -1431,8 +1565,9 @@ class CCD:
                 self.clear_slow_dwell_s,
                 self.trap_indices[0],
                 self.trap_indices[1],
-                self.clear_fast_emit_probs,
-                self.clear_slow_emit_probs,
+                self.clear_fast_rest_emit_probs,
+                self.clear_slow_rest_emit_probs,
+                self.trap_cross_emission_beta_clear,
                 self.trap_capture_alpha_clear,
                 self.trap_is_v3,
                 self.trapped_charge_1d,
@@ -1445,9 +1580,11 @@ class CCD:
             drain_traps_empty_numba(
                 self.trap_taus,
                 self.trap_capture_alpha_clear,
+                self.trap_cross_emission_beta_clear,
                 self.trap_is_v3,
                 self.trapped_charge_1d,
                 self.clear_fast_dwell_s,
+                self.clear_capture_dwell_s,
                 self.clear_three_hour_fast_shifts,
             )
 
@@ -1623,6 +1760,45 @@ class CCD:
             idx_A = all_idx[0::2] 
             idx_B = all_idx[1::2]
             
+            # ---------------------------------------------------------------
+            # FUTURE WORK -- "medium cluster" selection mask (spec'd 2026-08-03,
+            # deferred). Changes ONLY which pixels feed the hot-column /
+            # hot-pixel Poisson test below; it is never applied to the reported
+            # data counts and is not one of the 16 mask combinations.
+            #
+            # Motivation: the current selection excludes Halo (per-pixel >100 e-,
+            # L2 radius 60) and Bleed. That radius-60 halo removes ~37% of the
+            # MINOS quadrant from the rate estimate, and the finder still flags
+            # ~11-13 columns per image in the NO-TRAP branch, i.e. a pure
+            # false-positive floor with nothing hot injected.
+            #
+            # Spec:
+            #   medium_cluster = connected components (8-connectivity, the
+            #     existing get_cluster primitive at module scope) whose TOTAL
+            #     charge >= 5 e-, dilated by L2 distance < 4 px:
+            #         seed = get_cluster(img, min_pixs=1, min_total_value=5)
+            #         dist = cv2.distanceTransform((~seed).astype(np.uint8),
+            #                                      cv2.DIST_L2, cv2.DIST_MASK_PRECISE)
+            #         medium_cluster = dist < 4
+            #     (mirror generate_halo_mask's no-seed fallback)
+            #   Set it at image time as a new bit -- BIT_MEDCLUST = 64 is free in
+            #   the uint8 bitmask (1,2,4,8,16,32 are taken).
+            #   Then REPLACE Halo in the selection, splitting column vs pixel:
+            #       column stats : (b & (BIT_MEDCLUST | BIT_BLEED)) == 0
+            #       pixel  stats : (b &  BIT_MEDCLUST) == 0
+            #   i.e. hot-column uses Bleed, hot-pixel does not, and Halo drops
+            #   out of the selection entirely (it remains a reported mask).
+            #
+            # Implementation note: the two branches currently SHARE one boolean
+            # `u_t`/`u_nt` for both the column and pixel accumulators, so this
+            # requires threading two separate denominators through
+            # aggregate_subset rather than a one-line change.
+            #
+            # Caveat to check, not assume: dropping Halo shrinks the excluded
+            # radius 60 -> 4, so much more high-energy neighbourhood re-enters
+            # the denominator. Expected to lower the false-positive floor, but
+            # A/B it against the current masks on identical trials first.
+            # ---------------------------------------------------------------
             def aggregate_subset(indices):
                 t_denom_c, t_hits_c = np.zeros(self.ncol_quad), np.zeros(self.ncol_quad)
                 nt_denom_c, nt_hits_c = np.zeros(self.ncol_quad), np.zeros(self.ncol_quad)
@@ -1684,7 +1860,22 @@ class CCD:
         bad_cols_tB, bad_pix_tB = compute_masks(trap_col_data_B, trap_pix_data_B)
         bad_cols_ntB, bad_pix_ntB = compute_masks(notrap_col_data_B, notrap_pix_data_B)
 
-        
+        # Retain the derived hot masks so run_single_trial can persist them.
+        # They are otherwise discarded once folded into the bitmasks, which makes
+        # it impossible to ask afterwards WHICH traps HotColumn/HotPixel removed
+        # -- only aggregate unmasked_pix counts survive. Intersect these with
+        # trap_indices_rows/cols offline to answer that.
+        # Cross-application convention (see the loop below): images in half A are
+        # masked with the half-B mask and vice versa, so a trap's masked status
+        # depends on which half the image belongs to.
+        self.hot_masks = {
+            'trap_A':   (bad_cols_tA, bad_pix_tA),
+            'trap_B':   (bad_cols_tB, bad_pix_tB),
+            'notrap_A': (bad_cols_ntA, bad_pix_ntA),
+            'notrap_B': (bad_cols_ntB, bad_pix_ntB),
+        }
+
+
         # --- CROSS-APPLY MASKS ---
         for exp in unique_exposures:
             all_idx = np.where(np.array(self.exposures) == exp)[0]
@@ -2189,15 +2380,17 @@ class CCD:
         rows, cols = image.shape
 
         if tpix_vertical == self.tpix_vertical:
-            trap_emit_probs = self.readout_emit_probs
+            trap_rest_emit_probs = self.readout_rest_emit_probs
         else:
-            trap_emit_probs = 1.0 - np.exp(-tpix_vertical / self.trap_taus)
+            trap_rest_emit_probs = -np.expm1(-tpix_vertical / self.trap_taus)
 
         # Use the Numba JIT compiled C-loop to eliminate the python iteration bottleneck
         result_flat = fast_readout_numba(
             image, self.exposure_accumulator, tpix_vertical,
             self.trap_indices[0], self.trap_indices[1],
-            trap_emit_probs, self.trap_capture_alpha_readout, self.trap_is_v3,
+            trap_rest_emit_probs, self.pre_readout_emit_probs,
+            self.trap_cross_emission_beta_readout,
+            self.trap_capture_alpha_readout, self.trap_is_v3,
             self.trapped_charge_1d
         )
         self.ccd_state[:] = image
@@ -2503,6 +2696,24 @@ def run_single_trial(
         f.create_dataset('trap_is_v3',        data=CCDTest.trap_is_v3)
         f.create_dataset('trap_indices_rows', data=CCDTest.trap_indices[0].astype(np.int32))
         f.create_dataset('trap_indices_cols', data=CCDTest.trap_indices[1].astype(np.int32))
+        # Derived hot-column / hot-pixel masks (see CCD.process_run). Stored so
+        # the trap population can be intersected with them offline -- without
+        # these, only aggregate unmasked_pix survives and "which traps did the
+        # mask eat" is unanswerable. Cross-application: images in half A carry
+        # the *_B mask and vice versa.
+        hot_masks = getattr(CCDTest, 'hot_masks', None)
+        if hot_masks:
+            grp = f.create_group('hot_mask')
+            for key, (cols, pix) in hot_masks.items():
+                grp.create_dataset(
+                    f'bad_cols_{key}',
+                    data=np.asarray(sorted(cols), dtype=np.int32),
+                )
+                pix_arr = (
+                    np.asarray(sorted(pix), dtype=np.int32).reshape(-1, 2)
+                    if len(pix) else np.zeros((0, 2), dtype=np.int32)
+                )
+                grp.create_dataset(f'bad_pix_{key}', data=pix_arr)
         f.create_dataset('tau_weights',       data=np.array(tau_weights))
         f.create_dataset('tau_edges',         data=np.array(tau_edges))
         f.create_dataset(
@@ -2543,6 +2754,8 @@ def run_single_trial(
         f.attrs['readout_delay_vertical_ticks'] = CCDTest.readout_delay_vertical_ticks
         f.attrs['readout_capture_ticks'] = CCDTest.readout_capture_ticks
         f.attrs['readout_capture_dwell_s'] = CCDTest.readout_capture_dwell_s
+        f.attrs['pre_readout_horizontal_steps'] = CCDTest.pre_readout_horizontal_steps
+        f.attrs['pre_readout_dwell_s'] = CCDTest.pre_readout_dwell_s
         f.attrs['clear_capture_ticks'] = CCDTest.clear_capture_ticks
         f.attrs['clear_capture_dwell_s'] = CCDTest.clear_capture_dwell_s
         f.attrs['temperature_K'] = CCDTest.temperature_K
